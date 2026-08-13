@@ -1,0 +1,28 @@
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "cde"
+version = "0.1.0"
+description = "Cinephile discovery engine - metadata-only, graph-based film backbone"
+requires-python = ">=3.10"
+dependencies = [
+    "duckdb",
+    "requests",
+]
+
+[tool.setuptools.packages.find]
+include = ["cde*"]
+
+[tool.pytest.ini_options]
+markers = [
+    "integration: runs against the real data/processed/film.duckdb (skipped if absent)",
+]
+addopts = "-q"
+testpaths = ["tests"]
+
+[tool.flake8]
+max-line-length = 100
+extend-ignore = ["E203", "W503"]
+exclude = [".git", "__pycache__", ".venv", "venv", "data"]

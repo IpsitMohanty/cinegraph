@@ -1,0 +1,22 @@
+Downloading IMDb datasets...
+  [get]  title.basics.tsv.gz <- https://datasets.imdbws.com/title.basics.tsv.gz
+  [done] title.basics.tsv.gz (214.9 MB, expected 214.9 MB)
+  [get]  title.akas.tsv.gz <- https://datasets.imdbws.com/title.akas.tsv.gz
+  [done] title.akas.tsv.gz (486.6 MB, expected 486.6 MB)
+  [get]  title.ratings.tsv.gz <- https://datasets.imdbws.com/title.ratings.tsv.gz
+  [done] title.ratings.tsv.gz (8.2 MB, expected 8.2 MB)
+  [get]  title.crew.tsv.gz <- https://datasets.imdbws.com/title.crew.tsv.gz
+  [done] title.crew.tsv.gz (78.8 MB, expected 78.8 MB)
+
+Loading into DuckDB...
+
+=== IMDb backbone report ===
+film rows: 744866
+  movie: 744866
+film rows with a rating: 344478 (46.2%)
+title_lookup rows: 2973922 (covering 744866 distinct titles)
+  from aka: 2133410
+  from primary: 744866
+  from original: 95646
+=============================
+
