@@ -3,10 +3,17 @@ backbone built by cde.imdb.load().
 
 Pandas-free by design -- all I/O and counting goes through DuckDB
 (read_csv / COPY TO / fetchone() / fetchall()), not a DataFrame.
+
+Stage 3A (cde.explore) is this module's first live consumer: the Explore
+UI's title search box calls resolve_one_title() below to turn a typed
+title (+ optional year) into a tconst before handing it to explore(). See
+README "Stance" -- this path was dormant through stage 2, it isn't now.
 """
 
 from __future__ import annotations
 
+import csv
+import tempfile
 from pathlib import Path
 
 import duckdb
@@ -144,3 +151,30 @@ def resolve_titles(
 
 def _posix(path: Path) -> str:
     return str(path).replace("\\", "/")
+
+
+def resolve_one_title(con: duckdb.DuckDBPyConnection, title: str, year=None):
+    """Resolve a single ad-hoc title (+ optional year) to a tconst -- the
+    Explore UI's title -> tconst entry point.
+
+    A thin, additive wrapper around resolve_titles(): writes a one-row temp
+    CSV and reuses the exact same tested matching logic (no separate/fuzzy
+    matching path to keep in sync). Crude on purpose -- no autocomplete, no
+    partial-substring search; a fairly exact title (article/case/
+    punctuation-insensitive, per norm_title()) is expected. Returns the
+    matched tconst, or None if nothing matched.
+    """
+    with tempfile.TemporaryDirectory() as d:
+        csv_path = Path(d) / "query.csv"
+        with open(csv_path, "w", newline="", encoding="utf-8") as f:
+            w = csv.writer(f)
+            w.writerow(["title", "year"])
+            w.writerow([title, year if year is not None else ""])
+
+        out_path, matched, _total = resolve_titles(con, csv_path, "title", "year")
+        if matched == 0:
+            return None
+
+        with open(out_path, newline="", encoding="utf-8") as f:
+            row = next(csv.DictReader(f))
+            return row["tconst"] or None
