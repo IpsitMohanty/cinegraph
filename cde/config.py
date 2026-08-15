@@ -24,6 +24,15 @@ PEOPLE_FILES = [
 # shorts back deliberately later, if at all.
 DEFAULT_TYPES = ("movie",)
 
+# The creative-collaboration categories kept in `credits` (cde.people) --
+# the collaborator-network edges stage 3A navigates on. Deliberately
+# excludes `self`, `archive_footage`, `archive_sound`: real presence, not
+# creative collaboration.
+CREDIT_CATEGORIES = (
+    "director", "writer", "cinematographer", "composer", "editor",
+    "producer", "actor", "actress", "production_designer",
+)
+
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
 DATA_RAW = _PROJECT_ROOT / "data" / "raw"
 DATA_PROCESSED = _PROJECT_ROOT / "data" / "processed"

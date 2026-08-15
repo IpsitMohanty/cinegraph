@@ -16,6 +16,7 @@ import duckdb
 import pytest
 
 import cde.imdb as imdb_mod
+import cde.people as people_mod
 
 BASICS_HEADER = (
     "tconst\ttitleType\tprimaryTitle\toriginalTitle\tisAdult"
@@ -63,6 +64,44 @@ CREW_ROWS = [
     "tt0009999\tnm0010\t\\N",
 ]
 
+# Principals/name.basics fixtures for cde.people. Covers: creative
+# categories kept (director/writer/cinematographer/actor/composer/
+# producer), self and archive_footage dropped, a principals row on a
+# non-film tconst (tt0007777 is a short -- excluded from `film` by the
+# default --types filter) dropped by the JOIN, a person (nm1006) credited
+# only via a dropped-category row so they never reach `person`, a person
+# (nm1004) with credits on two films (degree 2), and a name.basics row
+# (nm9999) for someone never credited at all.
+PRINCIPALS_HEADER = "tconst\tordering\tnconst\tcategory\tjob\tcharacters"
+PRINCIPALS_ROWS = [
+    "tt0001111\t1\tnm1001\tdirector\t\\N\t\\N",
+    "tt0001111\t2\tnm1002\twriter\t\\N\t\\N",
+    "tt0001111\t3\tnm1003\tcinematographer\t\\N\t\\N",
+    "tt0001111\t4\tnm1004\tactor\t\\N\t[\"Andy Dufresne\"]",
+    "tt0001111\t5\tnm1004\tself\t\\N\t\\N",
+    "tt0002222\t1\tnm1003\tcinematographer\t\\N\t\\N",
+    "tt0002222\t2\tnm1005\tdirector\t\\N\t\\N",
+    "tt0002222\t3\tnm1006\tarchive_footage\t\\N\t\\N",
+    "tt0003333\t1\tnm1008\tcomposer\t\\N\t\\N",
+    "tt0003333\t2\tnm1004\tproducer\t\\N\t\\N",
+    "tt0007777\t1\tnm1007\tdirector\t\\N\t\\N",
+]
+
+NAME_BASICS_HEADER = (
+    "nconst\tprimaryName\tbirthYear\tdeathYear\tprimaryProfession\tknownForTitles"
+)
+NAME_BASICS_ROWS = [
+    "nm1001\tAlan Director\t\\N\t\\N\tdirector\t\\N",
+    "nm1002\tWendy Writer\t\\N\t\\N\twriter\t\\N",
+    "nm1003\tCameron Cinematographer\t\\N\t\\N\tcinematographer\t\\N",
+    "nm1004\tPat Player\t\\N\t\\N\tactor\t\\N",
+    "nm1005\tDiane Director\t\\N\t\\N\tdirector\t\\N",
+    "nm1006\tArchie Footage\t\\N\t\\N\tmiscellaneous\t\\N",
+    "nm1007\tSam Short\t\\N\t\\N\tdirector\t\\N",
+    "nm1008\tCory Composer\t\\N\t\\N\tcomposer\t\\N",
+    "nm9999\tNobody Credited\t\\N\t\\N\tactor\t\\N",
+]
+
 
 def _write_gz(path, header, rows):
     with gzip.open(path, "wt", encoding="utf-8", newline="") as f:
@@ -79,6 +118,8 @@ def raw_dir(tmp_path):
     _write_gz(d / "title.akas.tsv.gz", AKAS_HEADER, AKAS_ROWS)
     _write_gz(d / "title.ratings.tsv.gz", RATINGS_HEADER, RATINGS_ROWS)
     _write_gz(d / "title.crew.tsv.gz", CREW_HEADER, CREW_ROWS)
+    _write_gz(d / "title.principals.tsv.gz", PRINCIPALS_HEADER, PRINCIPALS_ROWS)
+    _write_gz(d / "name.basics.tsv.gz", NAME_BASICS_HEADER, NAME_BASICS_ROWS)
     return d
 
 
@@ -91,6 +132,15 @@ def con(raw_dir, monkeypatch):
     imdb_mod.load(c, with_people=False, types=None)
     yield c
     c.close()
+
+
+@pytest.fixture
+def con_people(con, raw_dir, monkeypatch):
+    """`con`, plus credits/person built by cde.people.load_people() from
+    the same fixtures."""
+    monkeypatch.setattr(people_mod, "DATA_RAW", raw_dir)
+    people_mod.load_people(con)
+    return con
 
 
 def lookup_reconciles(con: duckdb.DuckDBPyConnection) -> bool:
