@@ -7,8 +7,13 @@ two new tables in film.duckdb:
 
   credits -- (tconst, nconst, category, ordering), restricted to `film`
              tconsts and the creative categories in CREDIT_CATEGORIES.
-  person  -- (nconst, primary_name), restricted to nconsts that appear in
-             credits (no need to load all ~14M people in name.basics).
+  person  -- (nconst, primary_name, birth_year, death_year), restricted to
+             nconsts that appear in credits (no need to load all ~14M
+             people in name.basics). birth_year/death_year (nullable) were
+             added in stage 3A tuning, for the temporal-plausibility edge
+             check (cde.tuning) -- a rescore/re-release credit is often
+             detectable as a person whose active window can't span the
+             older of the two connected films.
 
 Note: stage 1's optional `load(with_people=True)` path also builds tables
 named `principal`/`person` (unfiltered categories, a wider `person` schema
@@ -72,12 +77,17 @@ def load_people(con: duckdb.DuckDBPyConnection, categories=CREDIT_CATEGORIES) ->
     """)
 
     # person: only the nconsts that actually appear in credits -- no need
-    # to load all ~14M people in name.basics.
+    # to load all ~14M people in name.basics. birth_year/death_year are
+    # nullable (most rows in name.basics have "\N" for either) -- absence
+    # just means the temporal-plausibility check (cde.tuning) can't say
+    # anything about that person, not that they're implausible.
     con.execute(f"""
         CREATE OR REPLACE TABLE person AS
         SELECT DISTINCT
             n.nconst,
-            n.primaryName AS primary_name
+            n.primaryName AS primary_name,
+            TRY_CAST(n.birthYear AS INTEGER) AS birth_year,
+            TRY_CAST(n.deathYear AS INTEGER) AS death_year
         FROM {_read_csv_expr(name_basics)} n
         WHERE n.nconst IN (SELECT DISTINCT nconst FROM credits)
     """)
