@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 
 IMDB_BASE = "https://datasets.imdbws.com/"
@@ -34,9 +35,15 @@ CREDIT_CATEGORIES = (
 )
 
 _PROJECT_ROOT = Path(__file__).resolve().parent.parent
-DATA_RAW = _PROJECT_ROOT / "data" / "raw"
-DATA_PROCESSED = _PROJECT_ROOT / "data" / "processed"
-DB_PATH = DATA_PROCESSED / "film.duckdb"
+DATA_RAW = Path(os.environ["CDE_DATA_RAW"]) if "CDE_DATA_RAW" in os.environ \
+    else _PROJECT_ROOT / "data" / "raw"
+DATA_PROCESSED = Path(os.environ["CDE_DATA_PROCESSED"]) if "CDE_DATA_PROCESSED" in os.environ \
+    else _PROJECT_ROOT / "data" / "processed"
+# CDE_DB_PATH overrides the whole path (not just the processed-data dir) --
+# deploy environments (e.g. a read-only or ephemeral filesystem) may need
+# film.duckdb somewhere other than DATA_PROCESSED entirely.
+DB_PATH = Path(os.environ["CDE_DB_PATH"]) if "CDE_DB_PATH" in os.environ \
+    else DATA_PROCESSED / "film.duckdb"
 
 # Common DuckDB CSV read options for IMDb's TSV format: tab-delimited, no
 # quote character (IMDb doesn't quote fields), "\N" is the null sentinel,

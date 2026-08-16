@@ -111,6 +111,7 @@ def _build_db():
         ("tt1013", "Low Billed Connection", 1990, "Mystery"),
         ("tt1014", "High Billed Connection", 1990, "Mystery"),
         ("tt1015", "Crew High Ordering", 1990, "Mystery"),
+        ("tt1016", "Different Role Film", 1990, "Mystery"),
     ])
 
     con.execute("""
@@ -175,6 +176,12 @@ def _build_db():
 
         ("tt1000", "nm2018", "cinematographer", 9),
         ("tt1015", "nm2018", "cinematographer", 1),
+
+        # Bilateral role display: nm2019 is writer on the seed but
+        # composer on tt1016 -- the explanation must say so, not imply
+        # "writer" held on tt1016 too.
+        ("tt1000", "nm2019", "writer", 12),
+        ("tt1016", "nm2019", "composer", 1),
     ]
     # Inflate nm2002's degree to 200 on tconsts that don't exist in `film`.
     credits_rows += [(f"tt9{i:03d}", "nm2002", "actor", 1) for i in range(198)]
@@ -201,6 +208,7 @@ def _build_db():
         ("nm2016", "Deep Cameo", None, None),
         ("nm2017", "Top Billed Lead", None, None),
         ("nm2018", "Crew Regardless Of Ordering", None, None),
+        ("nm2019", "Dual Role Person", None, None),
     ])
     return con
 
@@ -523,3 +531,31 @@ def test_explanation_uses_real_person_name_when_present(con_explore):
 def test_explore_unknown_tconst_raises(con_explore):
     with pytest.raises(ValueError):
         explore(con_explore, "tt_nonexistent")
+
+
+# --------------------------------------------------------------------------
+# bilateral role display (explanation integrity)
+# --------------------------------------------------------------------------
+
+
+def test_role_on_candidate_differs_from_seed_role(con_explore):
+    out = explore(con_explore, SEED, novelty=False, temporal_gate=False)
+    results = _by_tconst(out["results"])
+    r = results["tt1016"]
+
+    conn = r["connections"][0]
+    assert conn["role"] == "writer"              # nm2019's role on the seed
+    assert conn["role_on_candidate"] == "composer"  # their actual role here
+    # The explanation must show both, never imply "writer" held on tt1016.
+    assert "writer → composer" in r["explanation"]
+
+
+def test_role_on_candidate_same_as_seed_role_not_duplicated(con_explore):
+    out = explore(con_explore, SEED, novelty=False, temporal_gate=False)
+    results = _by_tconst(out["results"])
+    r = results["tt1001"]  # nm2001 is cinematographer on both sides
+
+    conn = r["connections"][0]
+    assert conn["role"] == conn["role_on_candidate"] == "cinematographer"
+    assert "cinematographer → cinematographer" not in r["explanation"]
+    assert "Rae Cinematographer (cinematographer)" in r["explanation"]

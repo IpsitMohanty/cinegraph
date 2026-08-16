@@ -174,9 +174,20 @@ def test_longer_high_weight_chain_preferred_over_short_weak_one(con_connect):
 def test_explanation_alternates_films_and_people(con_connect):
     result = connect(con_connect, "tt7000", "tt7002")
     assert "Film A" in result["explanation"]
-    assert "Dee Director (director)" in result["explanation"]
+    # Bilateral: role held on each side of the hop is shown separately
+    # (here nm8001 is "director" on both, but the format never collapses
+    # the two labels into one).
+    assert "-- director --> Dee Director -- director -->" in result["explanation"]
     assert "Film C" in result["explanation"]
-    assert result["explanation"].count("->") == 2
+    assert result["explanation"].count("-->") == 2
+
+
+def test_chain_hop_carries_bilateral_roles(con_connect):
+    result = connect(con_connect, "tt7000", "tt7002")
+    hop = next(c for c in result["chain"] if "person_name" in c)
+    assert hop["role_from"] == "director"
+    assert hop["role_to"] == "director"
+    assert "role" not in hop  # no collapsed single-role field
 
 
 # --------------------------------------------------------------------------
@@ -196,6 +207,59 @@ def test_finds_path_when_cap_allows_it(con_connect):
     assert result["hops"] == 5
     assert result["chain"][0]["tconst"] == "tt7020"
     assert result["chain"][-1]["tconst"] == "tt7025"
+
+
+# --------------------------------------------------------------------------
+# determinism (repeated identical query -> identical answer)
+# --------------------------------------------------------------------------
+
+
+def test_repeated_query_gives_identical_result(con_connect):
+    # Caught against real data: plain `set` iteration order is randomized
+    # per Python process (string hash randomization), so a tie between two
+    # equal-strength paths could resolve differently run to run against
+    # the SAME database -- confusing in a public demo. Frontiers are now
+    # iterated in sorted order specifically to prevent this; this test
+    # guards the fix, not just the underlying search quality.
+    results = [connect(con_connect, "tt7010", "tt7013") for _ in range(5)]
+    strengths = {r["strength"] for r in results}
+    hop_counts = {r["hops"] for r in results}
+    people_seqs = {
+        tuple(c["person_name"] for c in r["chain"] if "person_name" in c)
+        for r in results
+    }
+    assert len(strengths) == 1
+    assert len(hop_counts) == 1
+    assert len(people_seqs) == 1
+
+
+# --------------------------------------------------------------------------
+# timeout guardrail
+# --------------------------------------------------------------------------
+
+
+def test_timeout_reports_honestly_not_silently_degraded(con_connect):
+    # hop_cap=6 would normally find the 5-hop chain (previous test) -- an
+    # already-expired deadline forces a timeout instead, and it must be
+    # reported as exactly that, never silently downgraded to a shorter or
+    # weaker "path" to force a result within budget.
+    result = connect(con_connect, "tt7020", "tt7025", hop_cap=6, timeout_seconds=-1.0)
+    assert result["found"] is False
+    assert result["timed_out"] is True
+    assert "budget" in result["message"].lower()
+
+
+def test_no_path_without_timeout_is_not_marked_timed_out(con_connect):
+    # tt7000/tt7001 share no person at all -- genuinely no path, not a
+    # timeout, and the two must not be conflated.
+    result = connect(con_connect, "tt7000", "tt7001")
+    assert result["found"] is False
+    assert result["timed_out"] is False
+
+
+def test_timeout_can_be_disabled(con_connect):
+    result = connect(con_connect, "tt7020", "tt7025", hop_cap=6, timeout_seconds=None)
+    assert result["found"] is True
 
 
 def test_no_person_reused_within_a_single_path(con_connect):

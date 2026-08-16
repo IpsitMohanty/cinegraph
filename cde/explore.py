@@ -8,7 +8,15 @@ importable with `duckdb` alone -- no web dependency belongs in this module
 Algorithm, for a seed film F:
   1. people_F = credits rows for F (nconst, category). If a person has more
      than one category on F (rare, e.g. writer-director), the higher-
-     weighted category wins for scoring/display -- one edge per person.
+     weighted category wins for SCORING -- one edge per person. Each
+     connection also carries `role_on_candidate` -- the same person's
+     (separately deduped) category on the candidate film, which may differ
+     from `role` (their category on F). Scoring only ever uses `role`;
+     `role_on_candidate` is display-only, so the explanation can say
+     "writer -> composer" instead of implying one role held on both films
+     when it didn't (deploy brief: explanation integrity). Both are always
+     one of the real `credits.category` values -- never a finer label
+     (screenplay, adaptation, ...) the data doesn't hold.
   2. Candidates = other films sharing >=1 person with F (join credits on
      nconst). A person whose only credit is F contributes no candidate --
      that falls out of the join for free.
@@ -383,10 +391,26 @@ def _fetch_candidate_directors(con, tconsts):
 # Explanation formatting
 # --------------------------------------------------------------------------
 
+def _format_connection_role(c):
+    """Bilateral only where the roles actually differ -- collapsing to one
+    label when they match avoids "writer -> writer" noise, but a real
+    difference (Ray: writer here, composer there) is never flattened into
+    a single, potentially-wrong label. Only ever uses the category strings
+    `credits` actually carries (writer, cinematographer, ...) -- never a
+    finer-grained label (screenplay, adaptation, ...) the data doesn't
+    hold."""
+    role_to = c.get("role_on_candidate", c["role"])
+    if role_to == c["role"]:
+        return c["role"]
+    return f"{c['role']} → {role_to}"
+
+
 def _format_explanation(connections, shared_decade, shared_genres):
     parts = []
     if connections:
-        top = ", ".join(f"{c['person_name']} ({c['role']})" for c in connections[:3])
+        top = ", ".join(
+            f"{c['person_name']} ({_format_connection_role(c)})" for c in connections[:3]
+        )
         parts.append(f"connected through: {top}")
     if shared_decade is not None:
         parts.append(f"shared decade: {shared_decade}s")
@@ -454,16 +478,26 @@ def explore(
     nconsts = list(roles_f.keys())
     placeholders = ",".join("?" for _ in nconsts)
     candidate_rows = con.execute(f"""
-        SELECT DISTINCT tconst, nconst FROM credits
+        SELECT tconst, nconst, category FROM credits
         WHERE nconst IN ({placeholders}) AND tconst != ?
     """, nconsts + [tconst]).fetchall()
 
     if not candidate_rows:
         return {"seed": _seed_out(seed), "results": [], "thin_data": thin_data}
 
-    by_candidate = defaultdict(list)
-    for cand_tconst, nconst in candidate_rows:
-        by_candidate[cand_tconst].append(nconst)
+    # One role per (candidate, person) too -- same highest-weighted-wins
+    # dedup as roles_f, but keyed per candidate film since a person can
+    # hold a different category there than on the seed. This is what lets
+    # the explanation say what's actually true on each side, instead of
+    # implying the seed-side role held on the candidate too.
+    by_candidate = defaultdict(set)
+    roles_c = {}
+    for cand_tconst, nconst, category in candidate_rows:
+        by_candidate[cand_tconst].add(nconst)
+        key = (cand_tconst, nconst)
+        w = CATEGORY_WEIGHT.get(category, 0.0)
+        if key not in roles_c or w > CATEGORY_WEIGHT.get(roles_c[key], 0.0):
+            roles_c[key] = category
 
     if person_degree is not None:
         degree = {nc: person_degree.get(nc, 1) for nc in nconsts}
@@ -521,6 +555,7 @@ def explore(
                 "nconst": nconst,
                 "person_name": person_names.get(nconst, nconst),
                 "role": role,
+                "role_on_candidate": roles_c.get((cand_tconst, nconst), role),
                 "weight": round(weight, 4),
             })
         connections.sort(key=lambda c: c["weight"], reverse=True)

@@ -29,6 +29,24 @@ here the same way Explore's temporal gate now excludes from its own
 neighbourhoods -- worth a targeted look before Connect ships to real users
 at scale, not solved here.
 
+Known limitation, found during deploy verification and only partially
+fixed: this is a greedy bounded search, not an exhaustive optimal solver,
+so among several paths of similar strength, WHICH one is returned can vary
+between runs of the identical query against the identical, unchanged
+database. Two sources were found: (1) Python randomizes string hashing per
+process, so plain `set` iteration order for the search frontier varied run
+to run -- fixed here, frontiers are iterated in sorted order. (2) DuckDB's
+parallel table scan over the 8M-row `credits` table doesn't guarantee row
+order across query executions, which can still change which near-tied
+candidate the greedy search settles on -- NOT fixed here, because doing so
+properly (ORDER BY on every query in the hot path, or forcing single-
+threaded scans) would touch the query layer broadly enough to be a rewrite,
+which is explicitly out of scope for this brief. Every individual result is
+still honest about itself (a real, valid, strong-connector-only path
+satisfying the hop cap and no-reuse rules, with a strength that matches
+what's actually shown) -- the caveat is that asking the identical question
+twice is not guaranteed to draw the identical answer. Recorded, not solved.
+
 Approach (bounded bidirectional expansion -- crude-first, same discipline
 as Explore, not a provably optimal max-weight-path solver): the films<->
 people graph is far too large to materialize. From each film, a bounded,
@@ -58,6 +76,9 @@ two are not interchangeable.
 
 from __future__ import annotations
 
+import logging
+import time
+
 import duckdb
 
 from cde.explore import CATEGORY_WEIGHT, STRONG_CONNECTOR_CATEGORIES, _fetch_films, _get_film, idf
@@ -66,7 +87,21 @@ DEFAULT_HOP_CAP = 4
 MAX_PERSON_DEGREE_FOR_EXPANSION = 300
 MAX_NEIGHBORS_PER_FILM = 40
 
+# Deploy brief: a conservative execution timeout so a slow query degrades
+# to an honest "ran out of time" message instead of hanging the UI. This is
+# a cooperative deadline checked between films in the frontier expansion
+# (see _expand_frontier), not preemptive cancellation -- individual DuckDB
+# queries here are fast (milliseconds), so the actual overrun past the
+# deadline is small. Never relaxes connector quality or falls back to a
+# context-only path to force a result within budget.
+DEFAULT_TIMEOUT_SECONDS = 20.0
+
 _STRONG_CATS_SQL = ",".join(f"'{c}'" for c in STRONG_CONNECTOR_CATEGORIES)
+
+# Local-diagnosis timing only -- silent unless a caller configures logging
+# (e.g. `logging.getLogger("cde.connect").setLevel(logging.INFO)`). Never
+# surfaced to the UI/API response; see module docstring's performance note.
+logger = logging.getLogger(__name__)
 
 
 # --------------------------------------------------------------------------
@@ -123,12 +158,15 @@ def _strong_neighbors(
     expand_cap=MAX_NEIGHBORS_PER_FILM,
     degree_cap=MAX_PERSON_DEGREE_FOR_EXPANSION,
 ):
-    """[(neighbor_tconst, nconst, role_on_tconst, hop_weight), ...],
+    """[(neighbor_tconst, nconst, role_from, role_to, hop_weight), ...],
     strongest first, capped to `expand_cap` -- strong-connector hops out
-    of `tconst`. hop_weight is the MAX of the person's weight on each side
-    of the hop (they may hold a different, e.g. weaker, strong-connector
-    role on the far side; the hop is scored by their strongest identity,
-    not their weakest)."""
+    of `tconst`. role_from is the person's category on `tconst` (the film
+    being left); role_to is their category on `neighbor_tconst` (the film
+    being arrived at) -- carried separately, not collapsed to one label,
+    so the chain can say what's actually true when they differ (deploy
+    brief: never imply the same role held both sides when the data says
+    otherwise). hop_weight is still the MAX of the two -- scoring is
+    unchanged, only the display gained the second label."""
     people = _strong_connector_people(con, tconst)
 
     scored = []
@@ -143,18 +181,20 @@ def _strong_neighbors(
     scored.sort(key=lambda t: t[3], reverse=True)
 
     neighbors = []
-    for nconst, role, degree, weight_here in scored:
+    for nconst, role_from, degree, weight_here in scored:
         if len(neighbors) >= expand_cap:
             break
         rows = con.execute(f"""
             SELECT DISTINCT tconst, category FROM credits
             WHERE nconst = ? AND tconst != ? AND category IN ({_STRONG_CATS_SQL})
         """, [nconst, tconst]).fetchall()
-        for other_tconst, other_category in rows:
-            weight_there = CATEGORY_WEIGHT.get(other_category, 0.0) * idf(degree)
-            neighbors.append((other_tconst, nconst, role, max(weight_here, weight_there)))
+        for other_tconst, role_to in rows:
+            weight_there = CATEGORY_WEIGHT.get(role_to, 0.0) * idf(degree)
+            neighbors.append(
+                (other_tconst, nconst, role_from, role_to, max(weight_here, weight_there))
+            )
 
-    neighbors.sort(key=lambda t: t[3], reverse=True)
+    neighbors.sort(key=lambda t: t[4], reverse=True)
     return neighbors[:expand_cap]
 
 
@@ -162,19 +202,38 @@ def _strong_neighbors(
 # Bounded frontier expansion
 # --------------------------------------------------------------------------
 
-def _expand_frontier(con, start_tconst, max_depth, person_degree=None):
-    """{tconst: (strength, film_path, hop_path)} for every film reachable
-    from start_tconst within max_depth strong-connector hops (including
-    start_tconst itself, at strength 0), keeping the single best
-    (highest cumulative strength) path found to each."""
+def _expand_frontier(con, start_tconst, max_depth, person_degree=None, deadline=None):
+    """({tconst: (strength, film_path, hop_path)}, timed_out) for every
+    film reachable from start_tconst within max_depth strong-connector
+    hops (including start_tconst itself, at strength 0), keeping the
+    single best (highest cumulative strength) path found to each. Each hop
+    in hop_path is (nconst, role_from, role_to, weight).
+
+    `deadline` is an absolute time.monotonic() timestamp (see connect()'s
+    timeout_seconds) -- checked once per film in the frontier, not
+    preemptive: expansion simply stops early (never relaxing connector
+    quality or falling back to a weaker path to force a result), and
+    `timed_out` tells the caller whether the incomplete search is why no
+    path was found, as opposed to a genuine absence of one.
+
+    Frontiers are iterated in sorted (not raw set) order: Python randomizes
+    string hashing per process, so plain set iteration would make ties
+    (two equal-strength paths to the same film) resolve differently run to
+    run against the identical database -- confusing in a public demo where
+    asking the same question twice should give the same answer. Sorting
+    fixes that without touching the search's scope or scoring."""
     best = {start_tconst: (0.0, (start_tconst,), ())}
     frontier = {start_tconst}
+    timed_out = False
     for _ in range(max_depth):
         next_frontier = set()
-        for film in frontier:
+        for film in sorted(frontier):
+            if deadline is not None and time.monotonic() > deadline:
+                timed_out = True
+                break
             cur_strength, cur_path, cur_hops = best[film]
             cur_people = {h[0] for h in cur_hops}
-            for neighbor_tconst, nconst, role, weight in _strong_neighbors(
+            for neighbor_tconst, nconst, role_from, role_to, weight in _strong_neighbors(
                 con, film, person_degree
             ):
                 if neighbor_tconst in cur_path:
@@ -191,13 +250,15 @@ def _expand_frontier(con, start_tconst, max_depth, person_degree=None):
                     best[neighbor_tconst] = (
                         new_strength,
                         cur_path + (neighbor_tconst,),
-                        cur_hops + ((nconst, role, weight),),
+                        cur_hops + ((nconst, role_from, role_to, weight),),
                     )
                     next_frontier.add(neighbor_tconst)
+        if timed_out:
+            break
         frontier = next_frontier
         if not frontier:
             break
-    return best
+    return best, timed_out
 
 
 # --------------------------------------------------------------------------
@@ -206,7 +267,10 @@ def _expand_frontier(con, start_tconst, max_depth, person_degree=None):
 
 def _build_chain(con, films, hops):
     """Alternating [film, hop, film, hop, ..., film] -- the explained
-    chain. Never a graph blob."""
+    chain. Never a graph blob. Each hop carries role_from (the person's
+    category on the film just left) and role_to (their category on the
+    film being arrived at) SEPARATELY -- rendered bilaterally so the chain
+    never implies the same role held on both sides when it didn't."""
     films_info = _fetch_films(con, list(films))
     nconsts = [h[0] for h in hops]
     names = {}
@@ -224,29 +288,48 @@ def _build_chain(con, films, hops):
         info = films_info.get(tconst, {"title": tconst, "year": None})
         chain.append({"tconst": tconst, "title": info["title"], "year": info["year"]})
         if i < len(hops):
-            nconst, role, weight = hops[i]
+            nconst, role_from, role_to, weight = hops[i]
             chain.append({
                 "person_name": names.get(nconst, nconst),
-                "role": role,
+                "role_from": role_from,
+                "role_to": role_to,
                 "weight": round(weight, 4),
             })
     return chain
 
 
+def _film_label(item):
+    return f"{item['title']} ({item['year']})" if item.get("year") is not None else item["title"]
+
+
 def _format_chain_explanation(chain):
-    parts = []
-    for item in chain:
-        if "person_name" in item:
-            parts.append(f"{item['person_name']} ({item['role']})")
-        elif item["year"] is not None:
-            parts.append(f"{item['title']} ({item['year']})")
-        else:
-            parts.append(item["title"])
-    return " -> ".join(parts)
+    """Bilateral, arrow-style: Film A -- role_from --> Person -- role_to
+    --> Film B. Only the category label `credits` actually carries
+    (writer, cinematographer, ...) -- never a finer-grained label
+    (screenplay, adaptation, ...) the data doesn't hold."""
+    parts = [_film_label(chain[0])]
+    i = 1
+    while i < len(chain):
+        hop, film = chain[i], chain[i + 1]
+        parts.append(
+            f"-- {hop['role_from']} --> {hop['person_name']} "
+            f"-- {hop['role_to']} --> {_film_label(film)}"
+        )
+        i += 2
+    return " ".join(parts)
 
 
 def _film_out(film):
     return {"tconst": film["tconst"], "title": film["title"], "year": film["year"]}
+
+
+def _reverse_hop(hop):
+    """hops_b is recorded walking FROM b TOWARD the meeting point; the
+    final chain walks the meeting point back OUT to b, so each of its hops
+    is traversed backwards -- role_from/role_to must swap accordingly, or
+    the displayed direction would silently lie about which side is which."""
+    nconst, role_from, role_to, weight = hop
+    return (nconst, role_to, role_from, weight)
 
 
 # --------------------------------------------------------------------------
@@ -259,12 +342,19 @@ def connect(
     tconst_b: str,
     hop_cap: int = DEFAULT_HOP_CAP,
     person_degree: dict | None = None,
+    timeout_seconds: float | None = DEFAULT_TIMEOUT_SECONDS,
 ) -> dict:
     """Strongest strong-connector-only path between two films, within
-    `hop_cap` hops. Returns {"a", "b", "found", "strength", "hops",
+    `hop_cap` hops and (best-effort -- see _expand_frontier) within
+    `timeout_seconds`. Returns {"a", "b", "found", "strength", "hops",
     "chain", "explanation"} on success, or {"a", "b", "found": False,
-    "message"} when no strong-connector path exists within the cap --
-    never a silent fallback to a context-only path.
+    "message", "timed_out"} when no strong-connector path was found --
+    never a silent fallback to a context-only path, and never a relaxed
+    one to force a result within budget. `timed_out` distinguishes "ran out
+    of time" from "no path exists within the cap" -- both are honestly
+    reported, but they're different facts and the message says which.
+    Pass timeout_seconds=None to disable the budget entirely (e.g. for
+    offline/batch use, not the interactive UI).
     """
     if tconst_a == tconst_b:
         raise ValueError("a and b must be different films")
@@ -276,13 +366,20 @@ def connect(
     if film_b is None:
         raise ValueError(f"tconst {tconst_b!r} not found in film")
 
+    t0 = time.monotonic()
+    deadline = t0 + timeout_seconds if timeout_seconds is not None else None
+
     depth_a = hop_cap // 2 + hop_cap % 2  # ceil half
     depth_b = hop_cap // 2                # floor half
-    reached_a = _expand_frontier(con, tconst_a, depth_a, person_degree)
-    reached_b = _expand_frontier(con, tconst_b, depth_b, person_degree)
+    reached_a, timed_out_a = _expand_frontier(con, tconst_a, depth_a, person_degree, deadline)
+    reached_b, timed_out_b = _expand_frontier(con, tconst_b, depth_b, person_degree, deadline)
+    timed_out = timed_out_a or timed_out_b
 
     best = None
-    for film in set(reached_a) & set(reached_b):
+    # sorted(): same determinism reasoning as _expand_frontier's docstring
+    # -- a tie between two meeting points must resolve the same way every
+    # time against the same database.
+    for film in sorted(set(reached_a) & set(reached_b)):
         strength_a, path_a, hops_a = reached_a[film]
         strength_b, path_b, hops_b = reached_b[film]
         total_hops = len(hops_a) + len(hops_b)
@@ -300,17 +397,33 @@ def connect(
         if best is None or total_strength > best[0]:
             best = (total_strength, path_a, hops_a, path_b, hops_b)
 
+    elapsed = time.monotonic() - t0
+    logger.info(
+        "connect(%s, %s, hop_cap=%d): %.2fs, timed_out=%s, found=%s",
+        tconst_a, tconst_b, hop_cap, elapsed, timed_out, best is not None,
+    )
+
     if best is None:
+        if timed_out:
+            message = (
+                f"Search exceeded the {timeout_seconds:.0f}s interactive budget "
+                f"before finding a strong-connector path within {hop_cap} hops. "
+                "Try a smaller hop cap, or these two films may simply be far "
+                "apart in the graph."
+            )
+        else:
+            message = f"No strong-connector path found within {hop_cap} hops."
         return {
             "a": _film_out(film_a),
             "b": _film_out(film_b),
             "found": False,
-            "message": f"No strong-connector path found within {hop_cap} hops.",
+            "message": message,
+            "timed_out": timed_out,
         }
 
     total_strength, path_a, hops_a, path_b, hops_b = best
     full_films = list(path_a) + list(reversed(path_b[:-1]))
-    full_hops = list(hops_a) + list(reversed(hops_b))
+    full_hops = list(hops_a) + [_reverse_hop(h) for h in reversed(hops_b)]
     chain = _build_chain(con, full_films, full_hops)
 
     return {

@@ -14,7 +14,12 @@ import duckdb
 from fastapi import FastAPI, HTTPException, Query
 
 from cde.config import DB_PATH
-from cde.connect import DEFAULT_HOP_CAP, build_strong_person_degree, connect
+from cde.connect import (
+    DEFAULT_HOP_CAP,
+    DEFAULT_TIMEOUT_SECONDS,
+    build_strong_person_degree,
+    connect,
+)
 from cde.explore import (
     CREDIT_IMPORTANCE_K,
     CROSS_DIRECTOR_BONUS,
@@ -29,6 +34,13 @@ app = FastAPI(title="CineGraph Explore")
 _con = None
 _person_degree = None
 _strong_person_degree = None
+
+_DATA_MISSING_MESSAGE = (
+    f"film.duckdb not found at {DB_PATH}. This backbone is built locally from "
+    "the IMDb non-commercial datasets (never redistributed -- see README "
+    "'Data & licensing') via `python -m cde.cli build`, or point CDE_DB_PATH "
+    "at an existing one."
+)
 
 
 def _get_con():
@@ -45,6 +57,9 @@ def _get_con():
     also has cast credits. See cde/connect.py's docstring."""
     global _con, _person_degree, _strong_person_degree
     if _con is None:
+        if not DB_PATH.exists():
+            # A clear, actionable 503 -- not a raw DuckDB IOError/traceback.
+            raise HTTPException(status_code=503, detail=_DATA_MISSING_MESSAGE)
         _con = duckdb.connect(str(DB_PATH), read_only=True)
         _person_degree = build_person_degree(_con)
         _strong_person_degree = build_strong_person_degree(_con)
@@ -86,14 +101,19 @@ def get_connect(
     a: str = Query(..., description="tconst of the first film"),
     b: str = Query(..., description="tconst of the second film"),
     hop_cap: int = Query(DEFAULT_HOP_CAP, ge=1, le=8),
+    timeout_seconds: float = Query(DEFAULT_TIMEOUT_SECONDS, ge=1, le=60),
 ):
     """Strongest strong-connector-only path between two films. See
-    cde.connect.connect() -- returns found=False (not a 404) when no
-    strong path exists within hop_cap; a 404 means a or b isn't in the
-    backbone at all."""
+    cde.connect.connect() -- returns found=False (not a 404, and never a
+    relaxed/fallback path) when no strong path exists within hop_cap or
+    the search exceeds timeout_seconds (result["timed_out"] says which); a
+    404 means a or b isn't in the backbone at all."""
     con = _get_con()
     try:
-        return connect(con, a, b, hop_cap=hop_cap, person_degree=_strong_person_degree)
+        return connect(
+            con, a, b, hop_cap=hop_cap, person_degree=_strong_person_degree,
+            timeout_seconds=timeout_seconds,
+        )
     except ValueError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
 

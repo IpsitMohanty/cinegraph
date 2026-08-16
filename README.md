@@ -1,177 +1,219 @@
-# cinephile-discovery-engine
+# CineGraph
 
-A metadata-only, graph-based cinematic discovery engine. It builds a local
-backbone of film identity and structural relationships (title, year, cast,
-crew, and — in later stages — country, movement, and based-on/collaborator
-edges) from public metadata sources. It is not a rating recommender: nothing
-here optimizes for what audiences liked.
+## What CineGraph is
 
-## Stance
+CineGraph is a relational discovery engine over IMDb-derived film and
+creative-credit data. It builds a local backbone of film identity
+(`film`) and creative-collaboration edges (`credits`: director, writer,
+cinematographer, editor, composer, producer, production_designer, cast —
+`cde/people.py`), weights those edges by category and by how rare a
+specific collaborator is (`category_weight x idf(degree)` — `cde/explore.py`),
+and exposes three actions over the resulting graph: **Explore**, **Follow**,
+**Connect** (`cde/explore.py`, `cde/follow.py`, `cde/connect.py`). It is
+metadata-only — no plot text, no reviews, no embeddings, no LLM-derived
+tags anywhere in the ranking path.
 
-`imdb_rating` and `imdb_votes` are loaded as factual columns and are **never**
-used as a filter or a ranker anywhere in this package — including in CineGraph
-Explore's scoring, ranking, and novelty handling (stage 3A). Mass-user
-preference does not enter the ontology. The only place `imdb_votes` is touched
-at all is the resolver's tie-break, and only as identity disambiguation
-(deciding which real film a title+year pair refers to when more than one
-candidate matches) — not as a value judgment about quality. That resolver path
-is **used by Explore**: `resolve_one_title()` is its title-search-box entry
-point, turning a typed title (+ optional year) into a tconst before handing it
-to `explore()`. (Wikidata enrichment, stage 2, joins on `tconst` directly
-rather than through the resolver — that path stays parked on its own branch.)
+## Why it is not a conventional recommender
 
-## Data & licensing
+*(placeholder — the narrative goes here; see `PREDICTIONS.md`,
+`PREDICTIONS_tuning.md`, and the `Stance` note below for the underlying
+decisions this section will explain)*
 
-- Code is MIT licensed (see `LICENSE`).
-- Data comes from the [IMDb non-commercial datasets](https://developer.imdb.com/non-commercial-datasets/),
-  used under IMDb's personal/non-commercial terms. It is **not redistributed**
-  by this repo — `data/raw/` (the downloaded TSVs) and `data/processed/`
-  (the built DuckDB file) are gitignored; running `python -m cde.cli build`
-  regenerates them locally.
+One committed stance, stated plainly now rather than left to the
+narrative: `imdb_rating` and `imdb_votes` are loaded as factual columns
+and are **never** used as a filter or a ranker anywhere in this package —
+not in Explore's scoring, novelty handling, or credit-importance
+down-weight; not in Connect's path strength; not in Follow. Mass-user
+preference does not enter the ontology. The only place `imdb_votes` is
+touched at all is the title resolver's tie-break (`cde/resolve.py`),
+deciding which real film a title+year pair refers to when more than one
+candidate matches — identity disambiguation, not a value judgment about
+quality.
 
-### isAdult caveat
+## Core actions: Explore / Follow / Connect
 
-The backbone drops rows where IMDb's `isAdult` flag is `'1'`. This is a
-blanket filter, not a neutral default: IMDb's adult flag can catch
-legitimately transgressive canon (certain Oshima- and Pasolini-adjacent work,
-for instance) alongside what it's actually meant to exclude. It's kept as-is
-for this stage to preserve a pinned, verified count, but it's a known
-cinephile caveat to revisit when corpus definition is addressed directly
-(see "Out of scope" below).
+- **Explore** — find worthwhile relational exits from one film. A
+  result's score sums specific-person edges (rarer collaborator, stronger
+  edge) plus small fixed bonuses for shared decade/genre, deliberately
+  weaker than one real collaborator edge. Every result carries its
+  explanation — who connects it, in what role on each side (bilateral:
+  a person's role is never implied to be the same on both films when the
+  data says otherwise), plus shared decade/genre. Cast edges are
+  additionally down-weighted by billing order (`credit_importance` —
+  `CREDIT_IMPORTANCE_K`), so an uncredited-tier cameo can't dominate
+  discovery the way a top-billed lead legitimately can.
 
-## CineGraph Explore (stage 3A)
+  *[screenshot: Explore result list for a seed film]*
+  *[screenshot: craft-first film view]*
 
-Explore is the product's first action, and its walking skeleton: film in ->
-ranked, explained connected films out. It reads `film`, `credits` (the
-creative-collaboration edges loaded by `cde.people`), and `person`; it never
-ranks by audience preference. A result's score is a sum of specific-person
-edges (`category_weight[role] * idf(collaborator's degree)` — rarer
-collaborator, stronger edge) plus small fixed bonuses for shared decade/genre
-that are deliberately weaker than one real collaborator edge. Every result
-comes with its explanation (who connects it, in what role, plus shared
-decade/genre) — a graph blob is never the output; the explanation is the
-deliverable.
+- **Follow** — pick a person, or a decade/genre thread, from a film's
+  craft-first credit view, and pursue it. `Follow(person)` returns that
+  person's full filmography with the role held on each film.
+  `Follow(decade | genre)` returns films of that decade/genre scoped to
+  the seed film's collaborator neighbourhood — a pivot on the graph, not a
+  bare catalog filter. The entity registry is extensible: Wikidata-
+  dependent types (`company`, `distributor`, `work`, `series`, `movement`,
+  `festival`, `location`) are registered stubs (a clear response, never a
+  crash) — not built in v1, see Known limitations.
 
-**Capability boundaries** (so this stops being re-litigated):
-- **Era / period** — explicit, read straight from `startYear`. Yes.
-- **Genre** — explicit IMDb genre labels. Yes. (A genre-evolution *mode* is a
-  later brief, not this one.)
-- **Movement** — never a label the engine prints. It emerges only implicitly,
-  as a dense region of shared collaborators in a period (e.g. a shared
-  cinematographer across several 1970s Italian films) — the engine shows the
-  people and period that would constitute a movement to a human reader, it
-  never asserts the movement's name.
-- **Visual style / mise-en-scène / aesthetic sensibility** — out by design.
-  The engine shows the *structural substrate* (who / when / what-genre); it
-  never asserts that a film *has* a style. Read, don't derive — and never an
-  LLM tag.
+  *[screenshot: Follow(person) filmography]*
 
-The engine (`cde/explore.py`) is pandas-free and importable with `duckdb`
-alone. The API (FastAPI) and UI (Streamlit) are a separate layer with their
-own `requirements-app.txt` — the engine never imports a web framework.
+- **Connect** — find a meaningful route between two films. Strongest-path,
+  not shortest-path: traverses only strong-connector person edges (never
+  cast, never decade/genre — a shared decade is never a hop), maximizing
+  cumulative edge strength within a hop cap (default 4) rather than
+  minimizing hop count. When no strong-connector path exists within the
+  cap, or the search runs past its time budget, that is reported honestly
+  — never a silent fallback to a weaker or context-only "connection."
 
-## CineGraph Connect + Follow (stage 3A)
+  *[screenshot: a real multi-hop Connect chain]*
+  *[screenshot: honest no-path / bounded-search state]*
 
-The other two core actions, sharing Explore's edge-tier rule and priors
-(`cde/explore.py`'s `CATEGORY_WEIGHT`/`idf`) rather than re-deriving them:
+## Architecture
 
-- **Connect** (`cde/connect.py`) — the strongest meaningful path between two
-  films, not the shortest. Traverses only STRONG-CONNECTOR person edges
-  (director/writer/cinematographer/editor/composer/producer/
-  production_designer); a context edge (decade/genre) can never form a hop —
-  "both 1970s" is not a path, and Connect says so honestly rather than
-  falling back to one. Maximizes cumulative edge strength within a hop cap
-  (default 4), so a longer chain of rare-collaborator hops beats a short one
-  through someone ubiquitous. A real example (hop cap 4): *The Conformist*
-  → Vittorio Storaro (cinematographer) → *Ladyhawke* → Tom Mankiewicz
-  (writer) → *Delirious* → Cliff Eidelman (composer) → *Christopher
-  Columbus: The Discovery* → Mario Puzo (writer) → *The Godfather*. Known
-  limits, stated plainly: it's a bounded best-first search over a graph too
-  large to materialize (not a provably optimal solver), and a `hop_cap` of 4
-  currently takes single-digit-to-low-teens seconds against the full
-  744k-film backbone — noticeable in an interactive UI, a candidate for
-  further optimization rather than solved here.
-- **Follow** (`cde/follow.py`) — pivot on a graph **entity**, not a fixed
-  feature. `Follow(person)` returns that person's full filmography with the
-  role they held on each film (the Gordon Willis / Franco Arcalli motion).
-  `Follow(decade|genre)` returns films of that decade/genre scoped to the
-  seed's strong-connector neighbourhood — a pivot on the graph, not a bare
-  corpus filter. A film's credits are shown **craft-first**: director,
-  writer, cinematographer, editor, composer, producer, production_designer
-  as named departments; cast listed but secondary. The entity registry is
-  extensible on purpose — `company`, `distributor`, `work` (based-on),
-  `series`, `movement`, `festival`, `location` are registered stub types
-  (a clear `not_implemented` response, never a crash), waiting on the
-  parked Wikidata merge, not built here.
-
-```bash
-uvicorn app.api:app --reload
-# GET /explore/{tconst}?n=20
-# GET /connect?a={tconst}&b={tconst}&hop_cap=4
-# GET /follow?entity_type=person&id={nconst}
-# GET /follow?entity_type=decade&id=1970&seed={tconst}
+```
+IMDb non-commercial datasets (title.basics, title.principals, name.basics, ...)
+        |
+        v
+canonical films + credits  (cde/imdb.py, cde/people.py -> film.duckdb)
+        |
+        v
+weighted relational graph  (cde/explore.py: CATEGORY_WEIGHT x idf(degree),
+                             shared edge-tier rule: strong-connector /
+                             context-only / cast-conditional)
+        |
+        v
+Explore / Follow / Connect  (cde/explore.py, cde/follow.py, cde/connect.py
+                              -- pandas-free, importable without web deps)
+        |
+        v
+FastAPI (app/api.py)  +  Streamlit (app/streamlit_app.py)
 ```
 
-## Quickstart
+## Evaluation
+
+*(scaffold — the full narrative and final numbers are written next; the
+verified record already exists in-repo and is only referenced here, not
+restated as prose)*
+
+- **Methodology**: pre-registered predictions (`PREDICTIONS.md`,
+  `PREDICTIONS_tuning.md`), written and committed *before* the eval
+  harness (`eval_explore.py`) was run — checkable in git log ordering, not
+  just asserted.
+- **Judgment rubric**: each result labeled `interesting` / `trivial` /
+  `wrong`; weak results further diagnosed as `data-limited` (a coverage
+  gap, e.g. a thin-crew film) or `weighting-limited` (a scoring-tunable
+  problem) — kept as separate axes on purpose, so a fix is aimed at the
+  right layer.
+- **Passes run**: an initial pass, a confirm-then-fix tuning pass
+  (same-director penalty, temporal-plausibility gate), and a pre-ship pass
+  (credit-importance billing down-weight). `[fill in: exact
+  interesting/trivial/wrong counts per pass]` — see
+  `eval/explore_eval_labeled.md`, `eval/explore_eval_tuned_labeled.md`,
+  and the corresponding unlabeled tables for the full record.
+- **Scalar tuning was deliberately stopped**, not exhausted: the dominant
+  remaining failure mode (crew-clique list redundancy — near-duplicate
+  results from one dense collaborator ecosystem crowding a seed's top-N)
+  is a list-level diversity problem, not a per-edge weighting one, and is
+  routed to a deferred MMR/xQuAD reranker rather than chased with more
+  priors.
+
+## Known limitations
+
+Stated honestly, not smoothed over:
+
+- **Graph completeness depends on available principal credits.** IMDb's
+  `title.principals` caps entries per title; some real, well-known films
+  (found during eval: *Breathless*) have only cast rows in the source
+  data, so Explore has no strong-connector edge to promote for them
+  regardless of scoring. Signaled in the UI (`thin_data`), not silently
+  patched over.
+- **Role semantics can be broader than ideal.** The only granularity
+  available is IMDb's own `credits.category` (writer, cinematographer,
+  ...) — real distinctions like screenplay vs. novel vs. story adaptation
+  aren't in the current data. Roles are now rendered *bilaterally*
+  (a person's role on each side of a connection is shown separately, never
+  collapsed into one when they differ), but the label itself is still no
+  finer than what `credits.category` carries.
+- **Dense auteur/crew ecosystems create redundancy** in Explore's top-N
+  (the crew-clique failure mode above) — a list-level problem, deferred to
+  a diversity reranker.
+- **Connect's latency grows with hop depth.** A bounded, non-exhaustive
+  best-first search, not a provably optimal solver; hop cap 4 currently
+  takes single-digit-to-low-teens seconds against the full backbone.
+  Guarded with a conservative default cap, an execution timeout, and an
+  honest "search exceeded budget" message — never a relaxed or fallback
+  path to force a result within time.
+- **Connect's answer to an identical query can vary between runs.**
+  Among near-tied candidate paths, Python's per-process hash
+  randomization was one source (fixed — frontiers now iterate in sorted
+  order) and DuckDB's non-deterministic parallel-scan row order over the
+  8M-row `credits` table is a second, not fixed (would require touching
+  the query layer broadly enough to be a rewrite, out of scope here).
+  Every individual result is still honest about itself; asking the same
+  question twice is not guaranteed to draw the same answer.
+- **The public demo runs on a precomputed roster**, not the live engine —
+  see the data-strategy note below; the full live engine runs locally
+  against the real IMDb backbone.
+- **Wikidata entity types are deferred.** `company`, `distributor`,
+  `work`/based-on, `series`, `movement`, `festival`, `location` are
+  registered stubs in Follow's entity registry, not built — Phase A of
+  the (parked) Wikidata merge measured that layer too thin to build on
+  before a first deploy (33.8% IMDb-id match rate, movement present on
+  0.1%).
+- **No attention/reception signal exists anywhere in the graph yet** —
+  this is the same missing-signal gap across all three actions, not
+  three separate problems: Explore's strongest edge can be to an obscure
+  film, Follow's filmography has no sense of which entry mattered, and
+  Connect's strongest-path traversal is indifferent to whether an
+  intermediate film is itself noteworthy. The deferred reception/critical-
+  attention layer is designed to fill this gap; none of the three actions
+  papers over it with votes in the meantime.
+
+## Local setup
 
 ```bash
+# Core engine (pandas-free)
 pip install -r requirements.txt
-python -m cde.cli build                 # movies only, downloads + builds data/processed/film.duckdb
-python -m cde.cli build --with-people    # also loads name.basics / title.principals
-python -m cde.cli resolve my_titles.csv --title-col title --year-col year
-```
+python -m cde.cli build                  # downloads + builds data/processed/film.duckdb
+python -m cde.cli build --with-people     # + name.basics / title.principals
 
-Explore/Connect/Follow (need `film`, `credits`, `person` already loaded —
-see `cde.people`):
+# API + UI
+pip install -r requirements-app.txt
+uvicorn app.api:app --reload              # GET /explore/{tconst}, /connect, /follow
+streamlit run app/streamlit_app.py        # search -> Explore -> Follow / Connect
 
-```bash
-pip install -r requirements.txt -r requirements-app.txt
-uvicorn app.api:app --reload             # /explore, /connect, /follow -- see above
-streamlit run app/streamlit_app.py       # search -> Explore results -> click a
-                                          # person to Follow; a Connect tab
-```
+# Deploy platforms expecting one requirements file: requirements-deploy.txt
+# (= requirements.txt + requirements-app.txt combined; see that file's header)
 
-For development:
-
-```bash
+# Development
 pip install -r requirements.txt -r requirements-dev.txt
 flake8 cde tests
-pytest -q -m "not integration"          # unit tests only (what CI runs)
-pytest -q -m integration                # + integration, needs a built film.duckdb
+pytest -q -m "not integration"           # unit tests (what CI runs)
+pytest -q -m integration                 # + integration, needs a built film.duckdb
 ```
 
-## Status
+`film.duckdb` is required and is never bundled with the repo (see Data and
+licensing) — both `app/api.py` and `app/streamlit_app.py` fail with a
+clear, actionable message (not a raw database error) if it's absent.
+`CDE_DB_PATH` (and `CDE_DATA_RAW`/`CDE_DATA_PROCESSED`) override the
+default local paths for a deploy environment.
 
-V1, metadata-only. Stage 1 (IMDb backbone) complete and tested. Stage 3A now
-has all three core actions — Explore, Connect, Follow — built on the IMDb
-`credits`/`person` load, sharing one edge-tier rule and one set of priors.
-Explore alone went through three pre-registered eval passes (50% → 60%
-judged interesting, `wrong` under 7%; see `PREDICTIONS.md`,
-`PREDICTIONS_tuning.md`, `eval_explore.py`). Wikidata enrichment (stage 2)
-is parked on its own branch pending the reception-text stage. Plot text and
-expert/critic lists are deferred.
+## Data and licensing
 
-Unit tests (what CI runs): 14 passing on `main`. Unit + integration (run
-locally against the real ~429 MB `film.duckdb`, integration not run in CI):
-18 passing, confirming the package reproduces the reconstruction's verified
-numbers (744,866 movies, 46.2% rated, title_lookup reconciliation, resolver
-correctness on known anchors). (`imdb-people` through `connect-follow` are
-ahead of `main` with their own additional tests — 85 unit tests green on
-`connect-follow` — not yet merged; see each branch.)
-
-## Out of scope (next)
-
-Wikidata CC0 enrichment (country, movement, based-on, series, collaborator
-edges via SPARQL on IMDb id P345) — the merge that would promote Follow's
-stubbed entity types (`company`, `distributor`, `work`, `series`,
-`movement`, `festival`, `location`) to real, built implementations. Also:
-an MMR/xQuAD list-level diversity reranker (Explore's crew-clique
-list-redundancy failure mode — a real IR component with its own eval, not
-another scalar-weight tweak); role normalization + `BASED_ON` vs
-`WRITTEN_BY` edge subtyping with provenance (explanations currently show a
-shared person's role on the *seed*, not on the specific candidate — an
-occasionally-misleading but not incorrect simplification); entity/version
-dedup (e.g. a film re-released under a different IMDb entry); corpus
-definition by feature completeness rather than votes; and an optional,
-clearly-labelled institutional-attention re-ranker (awards, movement
-membership, national registries) with its own acknowledged prestige bias.
+- **Code**: MIT licensed (`LICENSE`).
+- **IMDb data**: the [IMDb non-commercial datasets](https://developer.imdb.com/non-commercial-datasets/),
+  under IMDb's personal/non-commercial terms. **Never redistributed** by
+  this repo or its deployed demo, in any form — `data/raw/` and
+  `data/processed/` are gitignored; `python -m cde.cli build` regenerates
+  them locally from IMDb directly. The public demo does not query a live
+  IMDb-derived backbone at all; see the data-strategy note (this repo's
+  deploy brief) for why and what it serves instead.
+- **Wikidata enrichment is not required for v1.** The Wikidata merge
+  (country, movement, based-on, series, collaborator edges, all CC0) is
+  explored on a parked branch and would be additive, licensed separately
+  under CC0 — not needed for anything documented above.
+- The `isAdult` filter (dropped from the backbone) is a stance, not a
+  neutral default: it can catch legitimately transgressive canon alongside
+  what it's meant to exclude. Kept as-is to preserve a pinned, verified
+  corpus count; revisit when corpus definition is addressed directly.
