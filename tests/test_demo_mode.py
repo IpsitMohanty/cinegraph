@@ -257,3 +257,67 @@ def test_entrypoint_import_chain_never_opens_duckdb_in_demo_mode(monkeypatch):
     import app.streamlit_app as entrypoint
     importlib.reload(entrypoint)
     assert entrypoint.DEMO_MODE is True
+
+
+def test_demo_mode_result_renders_as_card_with_chips_and_craft_headers(demo_env):
+    """Fix 5 (presentation polish): a result renders inside a bordered
+    container with the connecting person/shared-context info as chips
+    (small styled spans, not a plain "connected through: ..." sentence),
+    and craft groups get a reader-facing section header -- not a graph
+    drawing, still plain markdown/HTML text."""
+    at = AppTest.from_file(APP_PATH)
+    at.run(timeout=30)
+
+    _submit_demo_search(at, "Winter Ledger")
+    assert not at.exception
+
+    md_values = [m.value for m in at.markdown]
+    body = " ".join(md_values)
+
+    # craft section header (director -> "Direction")
+    assert "Direction" in body
+
+    # the connecting person (shared writer tt9000<->tt9002) renders as a
+    # chip: styled span, not the old "connected through: ..." sentence.
+    chip_lines = [m for m in md_values if "background:rgba" in m]
+    assert any("Demo Writer" in m for m in chip_lines), (
+        "expected the connecting person to render inside a styled chip span"
+    )
+    assert not any("connected through:" in m for m in md_values)
+
+
+def test_demo_mode_connect_chain_renders_as_single_horizontal_line(demo_env):
+    """Fix 5: the Connect path renders as ONE arrow-joined line (Film A ->
+    person -> Film B), not one stacked markdown element per hop."""
+    at = AppTest.from_file(APP_PATH)
+    at.run(timeout=30)
+
+    sel = at.selectbox[0]
+    pair_option = [o for o in sel.options if "Winter Ledger" in o][0]
+    sel.select(pair_option).run(timeout=30)
+    assert not at.exception
+
+    chain_lines = [
+        m.value for m in at.markdown
+        if "Winter Ledger" in m.value and "Coastal Harbor" in m.value
+    ]
+    assert len(chain_lines) == 1, "expected the whole chain on one markdown line"
+    assert "→" in chain_lines[0]
+    assert "Demo Writer" in chain_lines[0]
+
+
+def test_no_graph_visualization_library_used():
+    """Hard constraint, unchanged across every UX-polish brief: no node/
+    edge network-graph library anywhere in the dependency chain or the
+    app source -- presentation polish is text/card layout only."""
+    repo_root = Path(__file__).resolve().parent.parent
+    forbidden = ("networkx", "pyvis", "graphviz", "agraph", "d3")
+
+    for req_file in ("requirements.txt", "requirements-core.txt", "requirements-app.txt"):
+        text = (repo_root / req_file).read_text(encoding="utf-8").lower()
+        for lib in forbidden:
+            assert lib not in text, f"{lib} found in {req_file}"
+
+    app_source = (repo_root / "app" / "streamlit_app.py").read_text(encoding="utf-8").lower()
+    for lib in forbidden:
+        assert lib not in app_source, f"{lib} referenced in app/streamlit_app.py"

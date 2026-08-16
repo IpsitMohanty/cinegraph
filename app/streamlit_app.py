@@ -19,6 +19,7 @@ Demo mode: CDE_DEMO_MODE=1 streamlit run app/streamlit_app.py
 
 from __future__ import annotations
 
+import html
 import os
 
 import duckdb
@@ -27,7 +28,7 @@ import streamlit as st
 from cde.config import DB_PATH
 from cde.connect import DEFAULT_HOP_CAP, connect
 from cde.demo import ARTIFACT_PATH, demo_seed, load_artifact, roster_titles
-from cde.explore import build_person_degree, explore
+from cde.explore import _format_connection_role, build_person_degree, explore
 from cde.follow import film_view, follow_context, follow_person
 from cde.resolve import resolve_one_title
 
@@ -126,6 +127,104 @@ def _dedupe_people(people):
     return deduped
 
 
+def _chip(text):
+    """A small pill-shaped label -- Streamlit has no native "chip"
+    component, so this is a minimal inline-styled <span> via st.markdown
+    (unsafe_allow_html=True is the standard, dependency-free way to do
+    this; no JS, no external resources, no new library). Background uses
+    alpha instead of a fixed hex so it reads reasonably in both light and
+    dark themes; text color is left to inherit rather than set."""
+    return (
+        '<span style="background:rgba(128,128,128,0.18); padding:2px 9px; '
+        'border-radius:12px; font-size:0.85em; margin:2px 6px 2px 0; '
+        f'display:inline-block;">{html.escape(str(text))}</span>'
+    )
+
+
+def _render_chips(chips):
+    if chips:
+        st.markdown(" ".join(chips), unsafe_allow_html=True)
+
+
+def _shared_context_chips(shared_decade, shared_genres):
+    chips = []
+    if shared_decade is not None:
+        chips.append(_chip(f"{shared_decade}s"))
+    for genre in shared_genres or []:
+        chips.append(_chip(genre))
+    return chips
+
+
+# Craft department -> a reader-facing label, since `credits.category` is a
+# raw IMDb value (director, cinematographer, ...), not display copy.
+# Anything not in this map (shouldn't happen against the real backbone,
+# but defensive) falls back to a title-cased version of the raw category.
+_CRAFT_DISPLAY_LABELS = {
+    "director": "Direction",
+    "writer": "Writing",
+    "cinematographer": "Cinematography",
+    "editor": "Editing",
+    "composer": "Music",
+    "producer": "Producing",
+    "production_designer": "Production Design",
+    "cast": "Performance",
+}
+
+
+def _craft_label(category):
+    return _CRAFT_DISPLAY_LABELS.get(category, category.replace("_", " ").title())
+
+
+def _render_craft_section_header(category):
+    st.markdown(f"##### {_craft_label(category)}")
+
+
+def _render_connect_chain(chain):
+    """A single horizontal arrow-chain -- Film A -> (person, role) ->
+    Film B -> ... -- instead of one stacked line per hop. Still plain
+    text/markdown, just laid out as a path; bold marks a film node,
+    italic marks a person node so the two are visually distinct without
+    a graph drawing."""
+    parts = []
+    for item in chain:
+        if "person_name" in item:
+            role_from, role_to = item["role_from"], item["role_to"]
+            role = role_from if role_from == role_to else f"{role_from}→{role_to}"
+            parts.append(f"*{item['person_name']}* ({role})")
+        else:
+            year = item["year"] if item["year"] is not None else "?"
+            parts.append(f"**{item['title']}** ({year})")
+    st.markdown(" → ".join(parts))
+
+
+def _render_result_card(r, follow_key_prefix=None):
+    """One Explore/Connected-film result as a bordered card: title/year
+    header, a light score bar, shared-decade/genre as chips, and each
+    connecting person's role. follow_key_prefix (live mode) makes each
+    connecting person a clickable Follow button labeled with their role;
+    omitted (demo mode -- no live engine call to route an arbitrary click
+    into), the same info renders as plain informational chips instead."""
+    with st.container(border=True):
+        st.markdown(f"**{r['title']}** ({r['year']})")
+        st.progress(min(1.0, max(0.0, r["score"])), text=f"score {r['score']:.4f}")
+        _render_chips(_shared_context_chips(r.get("shared_decade"), r.get("shared_genres")))
+        connections = _dedupe_people(r["connections"])
+        if not connections:
+            return
+        if follow_key_prefix is None:
+            _render_chips([
+                _chip(f"{c['person_name']} ({_format_connection_role(c)})") for c in connections
+            ])
+            return
+        cols = st.columns(min(len(connections), 4) or 1)
+        for i, c in enumerate(connections):
+            nconst = c.get("nconst")
+            label = f"{c['person_name']} ({_format_connection_role(c)})"
+            with cols[i % len(cols)]:
+                if nconst and st.button(label, key=f"{follow_key_prefix}_{r['tconst']}_{nconst}"):
+                    _go_follow_person(nconst)
+
+
 def _render_person_buttons(people, key_prefix):
     """people: list of {"nconst", "name"} (or "person_name"/"nconst" from
     Explore connections). Renders each as a clickable Follow pivot."""
@@ -154,8 +253,9 @@ def _render_film_view(con, tconst):
 
     st.subheader(f"{view['title']} ({view['year']})")
     for group in view["groups"]:
-        st.markdown(f"**{group['category']}**")
+        _render_craft_section_header(group["category"])
         _render_person_buttons(group["people"], key_prefix=f"fv_{tconst}_{group['category']}")
+        st.write("")
 
     st.markdown("**follow a thread**")
     context_cols = st.columns(1 + len(view["genres"]) or 1)
@@ -276,10 +376,7 @@ def _render_explore_tab(con, person_degree):
 
     st.markdown("### Connected films")
     for r in result["results"]:
-        st.markdown(f"**{r['title']} ({r['year']})** — score {r['score']}")
-        st.write(r["explanation"])
-        _render_person_buttons(r["connections"], key_prefix=f"res_{r['tconst']}")
-        st.divider()
+        _render_result_card(r, follow_key_prefix="res")
 
 
 def _render_connect_tab(con):
@@ -324,18 +421,8 @@ def _render_connect_tab(con):
             st.warning(result["message"])
             return
         st.caption(f"{result['hops']} hops, strength {result['strength']}")
-        for item in result["chain"]:
-            if "person_name" in item:
-                # Bilateral: the role held leaving this film may differ
-                # from the role held arriving at the next one -- shown
-                # honestly, never collapsed to a single (possibly wrong)
-                # label.
-                st.write(
-                    f"↳ {item['role_from']} → **{item['person_name']}** → {item['role_to']}"
-                )
-            else:
-                year = item["year"] if item["year"] is not None else "?"
-                st.markdown(f"**{item['title']}** ({year})")
+        with st.container(border=True):
+            _render_connect_chain(result["chain"])
 
 
 def _get_demo_artifact():
@@ -382,8 +469,8 @@ def _render_demo_film(artifact, tconst):
     seed = demo_seed(artifact, tconst)
     st.subheader(f"{seed['title']} ({seed['year']})")
     for group in seed["film_view"]["groups"]:
-        st.markdown(f"**{group['category']}**")
-        st.write(", ".join(p["name"] for p in _dedupe_people(group["people"])))
+        _render_craft_section_header(group["category"])
+        _render_chips([_chip(p["name"]) for p in _dedupe_people(group["people"])])
 
     # Only entities actually precomputed for this seed are clickable --
     # demo mode makes no live engine call, so nothing else can be offered
@@ -420,9 +507,7 @@ def _render_demo_film(artifact, tconst):
         return
     st.markdown("### Connected films")
     for r in results:
-        st.markdown(f"**{r['title']} ({r['year']})** — score {r['score']}")
-        st.write(r["explanation"])
-        st.divider()
+        _render_result_card(r)
 
 
 def _render_demo_follow_person(artifact):
@@ -521,12 +606,8 @@ def _render_demo_connect_tab(artifact):
         st.warning(result["message"])
         return
     st.caption(f"{result['hops']} hops, strength {result['strength']}")
-    for item in result["chain"]:
-        if "person_name" in item:
-            st.write(f"↳ {item['role_from']} → **{item['person_name']}** → {item['role_to']}")
-        else:
-            year = item["year"] if item["year"] is not None else "?"
-            st.markdown(f"**{item['title']}** ({year})")
+    with st.container(border=True):
+        _render_connect_chain(result["chain"])
 
 
 def _render_demo_mode():
