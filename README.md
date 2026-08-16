@@ -70,6 +70,48 @@ The engine (`cde/explore.py`) is pandas-free and importable with `duckdb`
 alone. The API (FastAPI) and UI (Streamlit) are a separate layer with their
 own `requirements-app.txt` — the engine never imports a web framework.
 
+## CineGraph Connect + Follow (stage 3A)
+
+The other two core actions, sharing Explore's edge-tier rule and priors
+(`cde/explore.py`'s `CATEGORY_WEIGHT`/`idf`) rather than re-deriving them:
+
+- **Connect** (`cde/connect.py`) — the strongest meaningful path between two
+  films, not the shortest. Traverses only STRONG-CONNECTOR person edges
+  (director/writer/cinematographer/editor/composer/producer/
+  production_designer); a context edge (decade/genre) can never form a hop —
+  "both 1970s" is not a path, and Connect says so honestly rather than
+  falling back to one. Maximizes cumulative edge strength within a hop cap
+  (default 4), so a longer chain of rare-collaborator hops beats a short one
+  through someone ubiquitous. A real example (hop cap 4): *The Conformist*
+  → Vittorio Storaro (cinematographer) → *Ladyhawke* → Tom Mankiewicz
+  (writer) → *Delirious* → Cliff Eidelman (composer) → *Christopher
+  Columbus: The Discovery* → Mario Puzo (writer) → *The Godfather*. Known
+  limits, stated plainly: it's a bounded best-first search over a graph too
+  large to materialize (not a provably optimal solver), and a `hop_cap` of 4
+  currently takes single-digit-to-low-teens seconds against the full
+  744k-film backbone — noticeable in an interactive UI, a candidate for
+  further optimization rather than solved here.
+- **Follow** (`cde/follow.py`) — pivot on a graph **entity**, not a fixed
+  feature. `Follow(person)` returns that person's full filmography with the
+  role they held on each film (the Gordon Willis / Franco Arcalli motion).
+  `Follow(decade|genre)` returns films of that decade/genre scoped to the
+  seed's strong-connector neighbourhood — a pivot on the graph, not a bare
+  corpus filter. A film's credits are shown **craft-first**: director,
+  writer, cinematographer, editor, composer, producer, production_designer
+  as named departments; cast listed but secondary. The entity registry is
+  extensible on purpose — `company`, `distributor`, `work` (based-on),
+  `series`, `movement`, `festival`, `location` are registered stub types
+  (a clear `not_implemented` response, never a crash), waiting on the
+  parked Wikidata merge, not built here.
+
+```bash
+uvicorn app.api:app --reload
+# GET /explore/{tconst}?n=20
+# GET /connect?a={tconst}&b={tconst}&hop_cap=4
+# GET /follow?entity_type=person&id={nconst}
+# GET /follow?entity_type=decade&id=1970&seed={tconst}
+```
+
 ## Quickstart
 
 ```bash
@@ -79,12 +121,14 @@ python -m cde.cli build --with-people    # also loads name.basics / title.princi
 python -m cde.cli resolve my_titles.csv --title-col title --year-col year
 ```
 
-Explore (needs `film`, `credits`, `person` already loaded — see `cde.people`):
+Explore/Connect/Follow (need `film`, `credits`, `person` already loaded —
+see `cde.people`):
 
 ```bash
 pip install -r requirements.txt -r requirements-app.txt
-uvicorn app.api:app --reload             # GET /explore/{tconst}?n=20&novelty=false
-streamlit run app/streamlit_app.py       # title search box -> ranked, explained results
+uvicorn app.api:app --reload             # /explore, /connect, /follow -- see above
+streamlit run app/streamlit_app.py       # search -> Explore results -> click a
+                                          # person to Follow; a Connect tab
 ```
 
 For development:
@@ -98,24 +142,36 @@ pytest -q -m integration                # + integration, needs a built film.duck
 
 ## Status
 
-V1, metadata-only. Stage 1 (IMDb backbone) complete and tested. Stage 3A
-(CineGraph Explore, the walking skeleton) built on top of the IMDb
-`credits`/`person` load; evaluated via a pre-registered `PREDICTIONS.md` and
-`eval_explore.py` judgment pass. Wikidata enrichment (stage 2) is parked on
-its own branch pending the reception-text stage. Plot text and expert/critic
-lists are deferred.
+V1, metadata-only. Stage 1 (IMDb backbone) complete and tested. Stage 3A now
+has all three core actions — Explore, Connect, Follow — built on the IMDb
+`credits`/`person` load, sharing one edge-tier rule and one set of priors.
+Explore alone went through three pre-registered eval passes (50% → 60%
+judged interesting, `wrong` under 7%; see `PREDICTIONS.md`,
+`PREDICTIONS_tuning.md`, `eval_explore.py`). Wikidata enrichment (stage 2)
+is parked on its own branch pending the reception-text stage. Plot text and
+expert/critic lists are deferred.
 
 Unit tests (what CI runs): 14 passing on `main`. Unit + integration (run
 locally against the real ~429 MB `film.duckdb`, integration not run in CI):
 18 passing, confirming the package reproduces the reconstruction's verified
 numbers (744,866 movies, 46.2% rated, title_lookup reconciliation, resolver
-correctness on known anchors). (`imdb-people` and `cinegraph-3a` are ahead of
-`main` with their own additional tests, not yet merged — see each branch.)
+correctness on known anchors). (`imdb-people` through `connect-follow` are
+ahead of `main` with their own additional tests — 85 unit tests green on
+`connect-follow` — not yet merged; see each branch.)
 
 ## Out of scope (next)
 
 Wikidata CC0 enrichment (country, movement, based-on, series, collaborator
-edges via SPARQL on IMDb id P345), corpus definition by feature completeness
-rather than votes, and an optional, clearly-labelled institutional-attention
-re-ranker (awards, movement membership, national registries) with its own
-acknowledged prestige bias.
+edges via SPARQL on IMDb id P345) — the merge that would promote Follow's
+stubbed entity types (`company`, `distributor`, `work`, `series`,
+`movement`, `festival`, `location`) to real, built implementations. Also:
+an MMR/xQuAD list-level diversity reranker (Explore's crew-clique
+list-redundancy failure mode — a real IR component with its own eval, not
+another scalar-weight tweak); role normalization + `BASED_ON` vs
+`WRITTEN_BY` edge subtyping with provenance (explanations currently show a
+shared person's role on the *seed*, not on the specific candidate — an
+occasionally-misleading but not incorrect simplification); entity/version
+dedup (e.g. a film re-released under a different IMDb entry); corpus
+definition by feature completeness rather than votes; and an optional,
+clearly-labelled institutional-attention re-ranker (awards, movement
+membership, national registries) with its own acknowledged prestige bias.

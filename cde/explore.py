@@ -90,6 +90,13 @@ list-level diversity problem (MMR/xQuAD), not a scalar-weight one, and is
 explicitly deferred to a post-ship reranker rather than chased here with
 more priors.
 
+STRONG_CONNECTOR_CATEGORIES and CONTEXT_ENTITY_TYPES (below) are the edge-
+tier classification shared with cde.connect (strongest-path between two
+films, traversing strong-connector edges only) and cde.follow (pivot on a
+graph entity -- person, or a context entity scoped to a seed's
+neighbourhood). Both reuse this module's CATEGORY_WEIGHT/idf and several
+of its DB helpers directly rather than re-deriving them.
+
 Capability boundaries (also in README): era/genre are explicit, read
 straight from `film`. Movement is never a label the engine prints -- it
 only ever shows the shared people/period that would constitute one to a
@@ -158,6 +165,23 @@ TEMPORAL_GATE_YEAR_GAP = 40
 # (see module docstring).
 CAST_CATEGORIES = frozenset({"actor", "actress"})
 CREDIT_IMPORTANCE_K = 0.15
+
+# Edge tiers (stage 3A Connect/Follow -- encoded once here, shared by
+# cde.connect and cde.follow so the classification can't drift between
+# actions):
+#   STRONG CONNECTOR -- the craft-person edges: can bridge two films in
+#     Connect, and are the strong edges in Explore/Follow. Derived from
+#     CATEGORY_WEIGHT so it can never fall out of sync with it -- every
+#     category there except cast.
+#   CONTEXT-ONLY -- decade, genre. They annotate/score; they can be
+#     Followed, but they never form a Connect hop ("both 1970s" is not a
+#     path).
+#   CONDITIONAL (not built in v1) -- cast, and later company/festival/
+#     movement once Wikidata is merged: stays context-annotate +
+#     Explore's existing idf/billing discount, never promoted to a
+#     connector.
+STRONG_CONNECTOR_CATEGORIES = frozenset(CATEGORY_WEIGHT) - CAST_CATEGORIES
+CONTEXT_ENTITY_TYPES = frozenset({"decade", "genre"})
 
 DEFAULT_N = 20
 
@@ -494,6 +518,7 @@ def explore(
                 weight *= same_director_penalty
             people_score += weight
             connections.append({
+                "nconst": nconst,
                 "person_name": person_names.get(nconst, nconst),
                 "role": role,
                 "weight": round(weight, 4),
