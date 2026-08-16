@@ -4,28 +4,45 @@ clickable connecting people and context threads (-> Follow), and a
 two-film Connect input returning the explained chain. Plain lists/chains
 -- no graph/network visualization, no marketing copy.
 
+Two modes, one codebase: CDE_DEMO_MODE (env var) set -> browse the
+precomputed public-demo artifact (cde/demo.py, ~75-film curated roster),
+never opening film.duckdb at all. Unset -> the live engine against the
+real local backbone (unchanged from before). The public demo never
+redistributes IMDb data in any form -- see README "Data and licensing".
+
 Web-only deps (streamlit) live in requirements-app.txt -- the engine
 (cde/explore.py, cde/connect.py, cde/follow.py) never imports this module.
 
 Run: streamlit run app/streamlit_app.py
+Demo mode: CDE_DEMO_MODE=1 streamlit run app/streamlit_app.py
 """
 
 from __future__ import annotations
+
+import os
 
 import duckdb
 import streamlit as st
 
 from cde.config import DB_PATH
 from cde.connect import DEFAULT_HOP_CAP, connect
+from cde.demo import ARTIFACT_PATH, demo_seed, load_artifact, roster_titles
 from cde.explore import build_person_degree, explore
 from cde.follow import film_view, follow_context, follow_person
 from cde.resolve import resolve_one_title
+
+DEMO_MODE = bool(os.environ.get("CDE_DEMO_MODE"))
 
 _DATA_MISSING_MESSAGE = (
     f"film.duckdb not found at `{DB_PATH}`. This backbone is built locally from "
     "the IMDb non-commercial datasets (never redistributed -- see README "
     "'Data & licensing') via `python -m cde.cli build`, or point the "
     "`CDE_DB_PATH` environment variable at an existing one."
+)
+_ARTIFACT_MISSING_MESSAGE = (
+    f"Demo artifact not found at `{ARTIFACT_PATH}`. Build it locally with "
+    "`python build_demo_artifact.py` (needs a live film.duckdb -- the artifact "
+    "itself is derived, committable output; see README 'Data and licensing')."
 )
 
 
@@ -301,6 +318,212 @@ def _render_connect_tab(con):
                 st.markdown(f"**{item['title']}** ({year})")
 
 
+def _get_demo_artifact():
+    # Not st.cache_resource: the artifact is a plain dict (cheap to load,
+    # a few hundred KB of JSON) and re-reading it per session avoids any
+    # risk of a stale cached copy after a redeploy with a rebuilt artifact.
+    # ARTIFACT_PATH passed explicitly (not load_artifact()'s own default)
+    # so tests can monkeypatch this module's ARTIFACT_PATH at call time.
+    return load_artifact(ARTIFACT_PATH)
+
+
+def _demo_search(artifact, query):
+    """Case-insensitive substring match against the roster's own titles --
+    no DuckDB, no resolve_one_title(). A unique hit resolves; anything
+    ambiguous or absent is treated as "not in this demo" (see
+    _render_demo_explore_tab) rather than guessing."""
+    query = query.strip().lower()
+    if not query:
+        return None
+    matches = [tconst for tconst, label in roster_titles(artifact) if query in label.lower()]
+    return matches[0] if len(matches) == 1 else None
+
+
+def _go_demo_follow_person(seed_tconst, nconst):
+    st.session_state["demo_view"] = "follow_person"
+    st.session_state["demo_seed_tconst"] = seed_tconst
+    st.session_state["demo_follow_nconst"] = nconst
+    st.rerun()
+
+
+def _go_demo_follow_context(seed_tconst, index):
+    st.session_state["demo_view"] = "follow_context"
+    st.session_state["demo_ctx_seed"] = seed_tconst
+    st.session_state["demo_ctx_index"] = index
+    st.rerun()
+
+
+def _back_to_demo_explore():
+    st.session_state["demo_view"] = "explore"
+    st.rerun()
+
+
+def _render_demo_film(artifact, tconst):
+    seed = demo_seed(artifact, tconst)
+    st.subheader(f"{seed['title']} ({seed['year']})")
+    for group in seed["film_view"]["groups"]:
+        st.markdown(f"**{group['category']}**")
+        st.write(", ".join(p["name"] for p in group["people"]))
+
+    # Only entities actually precomputed for this seed are clickable --
+    # demo mode makes no live engine call, so nothing else can be offered
+    # honestly.
+    followable_people = [
+        (nconst, res["entity_name"]) for nconst, res in seed["follow_people"].items()
+    ]
+    if followable_people:
+        st.markdown("**follow a thread (precomputed for this demo)**")
+        cols = st.columns(min(len(followable_people), 4) or 1)
+        for i, (nconst, name) in enumerate(followable_people):
+            with cols[i % len(cols)]:
+                if st.button(name, key=f"demo_follow_{tconst}_{nconst}"):
+                    _go_demo_follow_person(tconst, nconst)
+    if seed["follow_contexts"]:
+        cols = st.columns(min(len(seed["follow_contexts"]), 4) or 1)
+        for i, fc in enumerate(seed["follow_contexts"]):
+            label = f"{fc['entity_id']}s" if fc["entity_type"] == "decade" else fc["entity_id"]
+            with cols[i % len(cols)]:
+                if st.button(label, key=f"demo_ctx_{tconst}_{i}"):
+                    _go_demo_follow_context(tconst, i)
+
+    if seed["thin_data"]:
+        st.info(
+            "Limited crew data for this film -- IMDb's credited principals for "
+            "this title are cast-only, so results below lean on cast connections "
+            "rather than cinematographer/editor/composer/writer links. Not a "
+            "ranking judgment, just a coverage gap."
+        )
+
+    results = seed["explore"]["results"]
+    if not results:
+        st.write("No connected films found (no shared creative collaborators).")
+        return
+    st.markdown("### Connected films")
+    for r in results:
+        st.markdown(f"**{r['title']} ({r['year']})** — score {r['score']}")
+        st.write(r["explanation"])
+        st.divider()
+
+
+def _render_demo_follow_person(artifact):
+    seed_tconst = st.session_state["demo_seed_tconst"]
+    nconst = st.session_state["demo_follow_nconst"]
+    if st.button("< Back to Explore"):
+        _back_to_demo_explore()
+        return
+    result = demo_seed(artifact, seed_tconst)["follow_people"][nconst]
+    st.subheader(f"Follow: {result['entity_name']}")
+    st.caption(f"{len(result['films'])} credited films")
+    for f in result["films"]:
+        year = f["year"] if f["year"] is not None else "?"
+        st.write(f"{year} — **{f['title']}** ({f['role']})")
+
+
+def _render_demo_follow_context(artifact):
+    seed_tconst = st.session_state["demo_ctx_seed"]
+    index = st.session_state["demo_ctx_index"]
+    if st.button("< Back to Explore"):
+        _back_to_demo_explore()
+        return
+    result = demo_seed(artifact, seed_tconst)["follow_contexts"][index]
+    st.subheader(f"Follow: {result['entity_type']} = {result['entity_id']}")
+    st.caption(
+        f"scoped to {result['seed']['title']}'s connected films, not the whole catalog"
+    )
+    if not result["films"]:
+        st.write("No connected films matched.")
+        return
+    for f in result["films"]:
+        year = f["year"] if f["year"] is not None else "?"
+        st.write(f"{year} — **{f['title']}**")
+
+
+def _render_demo_explore_tab(artifact):
+    n_roster = len(artifact["seeds"])
+    st.write(
+        f"This demo covers {n_roster} curated films with precomputed results. "
+        "The full engine runs live against the complete IMDb-derived backbone locally."
+    )
+    query = st.text_input("Search the demo roster (title)", key="demo_search_query")
+    with st.expander(f"browse all {n_roster} films in this demo"):
+        for _tconst, label in roster_titles(artifact):
+            st.write(label)
+
+    if st.button("Search", key="demo_search_button") and query.strip():
+        tconst = _demo_search(artifact, query)
+        if tconst is None:
+            st.error(
+                f"'{query}' isn't in this {n_roster}-film demo roster -- try the "
+                "browse list above, or run the full engine locally against the "
+                "complete backbone."
+            )
+            return
+        st.session_state["demo_explore_tconst"] = tconst
+
+    tconst = st.session_state.get("demo_explore_tconst")
+    if tconst:
+        _render_demo_film(artifact, tconst)
+
+
+def _render_demo_connect_tab(artifact):
+    pairs = artifact["connect_pairs"]
+    if not pairs:
+        st.write("No Connect pairs precomputed for this demo.")
+        return
+    options = {
+        f"{result['a']['title']} ({result['a']['year']}) <-> "
+        f"{result['b']['title']} ({result['b']['year']})": key
+        for key, result in pairs.items()
+    }
+    choice = st.selectbox("Curated pair", list(options.keys()))
+    result = pairs[options[choice]]
+
+    st.subheader(f"{result['a']['title']} → {result['b']['title']}")
+    if not result["found"]:
+        st.warning(result["message"])
+        return
+    st.caption(f"{result['hops']} hops, strength {result['strength']}")
+    for item in result["chain"]:
+        if "person_name" in item:
+            st.write(f"↳ {item['role_from']} → **{item['person_name']}** → {item['role_to']}")
+        else:
+            year = item["year"] if item["year"] is not None else "?"
+            st.markdown(f"**{item['title']}** ({year})")
+
+
+def _render_demo_mode():
+    if not ARTIFACT_PATH.exists():
+        st.error(_ARTIFACT_MISSING_MESSAGE)
+        st.stop()
+    artifact = _get_demo_artifact()
+
+    st.info(
+        f"Public demo mode -- browsing {len(artifact['seeds'])} curated, precomputed "
+        "films. The full engine runs locally against the complete IMDb-derived "
+        "backbone (never redistributed here -- see README)."
+    )
+
+    st.session_state.setdefault("demo_view", "explore")
+    view = st.session_state["demo_view"]
+    if view == "follow_person":
+        _render_demo_follow_person(artifact)
+        return
+    if view == "follow_context":
+        _render_demo_follow_context(artifact)
+        return
+
+    st.markdown(
+        "**Explore** -- find worthwhile exits from one film.  \n"
+        "**Follow** -- click a precomputed person or decade/genre thread.  \n"
+        "**Connect** -- pick a curated pair and see the strongest route."
+    )
+    tab_explore, tab_connect = st.tabs(["Explore", "Connect"])
+    with tab_explore:
+        _render_demo_explore_tab(artifact)
+    with tab_connect:
+        _render_demo_connect_tab(artifact)
+
+
 def main():
     st.set_page_config(page_title="CineGraph")
     st.title("CineGraph")
@@ -309,6 +532,13 @@ def main():
         "not a rating-based recommender. Structural substrate only "
         "(who / when / what-genre), never votes, never a style label."
     )
+
+    if DEMO_MODE:
+        # Branches out, and returns, before _get_con() is ever called --
+        # demo mode must never open film.duckdb (see module docstring and
+        # tests/test_demo_mode.py).
+        _render_demo_mode()
+        return
 
     if not DB_PATH.exists():
         st.error(_DATA_MISSING_MESSAGE)

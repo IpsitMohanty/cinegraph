@@ -151,10 +151,23 @@ Stated honestly, not smoothed over:
   8M-row `credits` table is a second, not fixed (would require touching
   the query layer broadly enough to be a rewrite, out of scope here).
   Every individual result is still honest about itself; asking the same
-  question twice is not guaranteed to draw the same answer.
-- **The public demo runs on a precomputed roster**, not the live engine —
-  see the data-strategy note below; the full live engine runs locally
-  against the real IMDb backbone.
+  question twice is not guaranteed to draw the same answer — confirmed
+  directly while building the public-demo artifact: repeated live runs of
+  Connect(*The Conformist*, *The Godfather*) at the default hop cap found
+  a real path roughly 7 times out of 8 sampled (strength 0.70–0.90), and
+  "no path found" the rest. A live-engine roadmap item is to make
+  candidate-neighbor selection order-stable so this stops being possible;
+  not fixed here.
+- **The public demo runs on a fixed, precomputed roster**, not the live
+  engine. `CDE_DEMO_MODE=1` switches `app/streamlit_app.py` to read
+  `demo/artifact.json` — a committed JSON file of Explore/Follow/Connect
+  *outputs* for ~75 curated films, computed once by the real engine and
+  frozen — instead of opening `film.duckdb` at all. This sidesteps the
+  Connect non-determinism above by construction: each demo Connect pair is
+  one specific, inspectable, checked-in answer, not a live query. A search
+  outside the roster gets an honest "not in this demo" message pointing at
+  the full local install, never an error or an empty hang. See "Data and
+  licensing" for what the artifact does and does not contain.
 - **Wikidata entity types are deferred.** `company`, `distributor`,
   `work`/based-on, `series`, `movement`, `festival`, `location` are
   registered stubs in Follow's entity registry, not built — Phase A of
@@ -183,6 +196,10 @@ pip install -r requirements-app.txt
 uvicorn app.api:app --reload              # GET /explore/{tconst}, /connect, /follow
 streamlit run app/streamlit_app.py        # search -> Explore -> Follow / Connect
 
+# Public-demo artifact (needs a locally built film.duckdb; never run in CI)
+python build_demo_artifact.py             # writes demo/artifact.json
+CDE_DEMO_MODE=1 streamlit run app/streamlit_app.py   # browses the artifact, no film.duckdb opened
+
 # Deploy platforms expecting one requirements file: requirements-deploy.txt
 # (= requirements.txt + requirements-app.txt combined; see that file's header)
 
@@ -206,9 +223,28 @@ default local paths for a deploy environment.
   under IMDb's personal/non-commercial terms. **Never redistributed** by
   this repo or its deployed demo, in any form — `data/raw/` and
   `data/processed/` are gitignored; `python -m cde.cli build` regenerates
-  them locally from IMDb directly. The public demo does not query a live
-  IMDb-derived backbone at all; see the data-strategy note (this repo's
-  deploy brief) for why and what it serves instead.
+  them locally from IMDb directly.
+- **The public demo ships a results artifact, not a data dump.**
+  `demo/artifact.json` (`cde/demo.py`, built by `build_demo_artifact.py`)
+  is committed to this repo and served by `app/streamlit_app.py` when
+  `CDE_DEMO_MODE=1` is set — but it holds only *derived outputs*: film
+  titles, years, tconsts as opaque ids, computed Explore/Connect/Follow
+  results, roles as displayed, scores. It is never a reshaping of the
+  `credits`/`person` tables — that would still be IMDb's relational data
+  under a different file format, and the whole point of this file's
+  existence is to not do that. `tests/test_demo.py` enforces this
+  mechanically: it walks the generated artifact for table-shaped keys
+  (`credits`, `ordering`, `ratings`, `imdb_rating`, `imdb_votes`) and
+  fails the suite if any leak in. The roster is curated (~75 films: the
+  12 era/country-spread eval seeds, weighted toward results the labeled
+  eval scored `interesting`) so a demo visitor's first click lands on the
+  engine at its best — including *The Conformist* and *The Godfather*
+  (the strongest labeled Explore results, and Connect's headline chain
+  between them) and *Breathless* (deliberately included as a thin-data
+  case: the demo shows the engine being honest about a coverage gap, not
+  only its wins). The full live engine — the real thing this demo is a
+  frozen sample of — runs locally against the complete IMDb-derived
+  backbone; see "Local setup".
 - **Wikidata enrichment is not required for v1.** The Wikidata merge
   (country, movement, based-on, series, collaborator edges, all CC0) is
   explored on a parked branch and would be additive, licensed separately
