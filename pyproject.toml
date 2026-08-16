@@ -7,9 +7,20 @@ name = "cde"
 version = "0.1.0"
 description = "Cinephile discovery engine - metadata-only, graph-based film backbone"
 requires-python = ">=3.10"
+# Includes the app/UI deps (fastapi, uvicorn, streamlit), not just the
+# core engine's (duckdb, requests) -- deliberately, as a belt-and-suspenders
+# safeguard: Streamlit Community Cloud auto-discovers requirements.txt OR
+# pyproject.toml at the repo root, and this repo's precedence between the
+# two isn't something to gamble the deploy on. Kept in sync with
+# requirements.txt (= requirements-core.txt + requirements-app.txt); the
+# core/app split for local dev proof-of-no-web-dependency lives in those
+# files, not here.
 dependencies = [
     "duckdb",
     "requests",
+    "fastapi",
+    "uvicorn",
+    "streamlit",
 ]
 
 [tool.setuptools.packages.find]
