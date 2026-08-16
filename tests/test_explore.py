@@ -51,6 +51,21 @@ Phase 2 tuning fixtures (stage 3A tuning, Fix 1 / Fix 2):
   tt1012 "Cast Only Classic" (1965)      -- a second "seed": nm2014/nm2015,
                                              actor/actress only, no crew
                                              role at all -- thin_data case.
+
+Pre-ship tuning fixtures (credit-importance billing down-weight, cast
+only). tt1013/tt1014/tt1015 all share the seed's decade/genre (1990,
+Mystery vs. the seed's 1975 Drama/Crime -- no overlap either way), so their
+scores isolate the person edge alone with zero bonus noise:
+
+  tt1013 "Low Billed Connection" (1990)  -- nm2016 actor, ordering=9 on the
+                                             seed (a deep cameo), degree 2.
+  tt1014 "High Billed Connection" (1990) -- nm2017 actor, ordering=1 on the
+                                             seed (the lead), degree 2.
+  tt1015 "Crew High Ordering" (1990)     -- nm2018 cinematographer,
+                                             ordering=9 on the seed, degree
+                                             2 -- billing is cast-only, so
+                                             this must score exactly like
+                                             ordering=1 would.
 """
 
 import duckdb
@@ -63,6 +78,7 @@ from cde.explore import (
     GENRE_BONUS_CAP_GENRES,
     GENRE_BONUS_PER_GENRE,
     SAME_DIRECTOR_PENALTY,
+    _billing_factor,
     build_person_degree,
     explore,
     idf,
@@ -92,6 +108,9 @@ def _build_db():
         ("tt1010", "Modern Rescore", 2020, "Drama"),
         ("tt1011", "Modern But Plausible", 2020, "Drama"),
         ("tt1012", "Cast Only Classic", 1965, "Drama"),
+        ("tt1013", "Low Billed Connection", 1990, "Mystery"),
+        ("tt1014", "High Billed Connection", 1990, "Mystery"),
+        ("tt1015", "Crew High Ordering", 1990, "Mystery"),
     ])
 
     con.execute("""
@@ -145,6 +164,17 @@ def _build_db():
         # Thin-data seed: cast-only, no crew role at all.
         ("tt1012", "nm2014", "actor", 1),
         ("tt1012", "nm2015", "actress", 2),
+
+        # Credit-importance billing: low-billed vs. top-billed cast, and a
+        # high-ordering crew edge that billing must NOT touch.
+        ("tt1000", "nm2016", "actor", 9),
+        ("tt1013", "nm2016", "actor", 1),
+
+        ("tt1000", "nm2017", "actor", 1),
+        ("tt1014", "nm2017", "actor", 1),
+
+        ("tt1000", "nm2018", "cinematographer", 9),
+        ("tt1015", "nm2018", "cinematographer", 1),
     ]
     # Inflate nm2002's degree to 200 on tconsts that don't exist in `film`.
     credits_rows += [(f"tt9{i:03d}", "nm2002", "actor", 1) for i in range(198)]
@@ -168,6 +198,9 @@ def _build_db():
         ("nm2011", "Classic Novelist", None, 1900),
         ("nm2012", "Mystery Rescorer", None, None),
         ("nm2013", "Plausible Composer", 1930, None),
+        ("nm2016", "Deep Cameo", None, None),
+        ("nm2017", "Top Billed Lead", None, None),
+        ("nm2018", "Crew Regardless Of Ordering", None, None),
     ])
     return con
 
@@ -224,7 +257,9 @@ def test_idf_basic():
 
 
 def test_rare_cinematographer_outscores_ubiquitous_actor(con_explore):
-    out = explore(con_explore, SEED, novelty=False, temporal_gate=False)
+    out = explore(
+        con_explore, SEED, novelty=False, temporal_gate=False, credit_importance=False,
+    )
     results = _by_tconst(out["results"])
 
     cinematographer_edge = results["tt1001"]["connections"][0]["weight"]
@@ -250,7 +285,9 @@ def test_bonus_smaller_than_specific_person_edge():
 
 
 def test_shared_decade_and_genre_bonus_applied(con_explore):
-    out = explore(con_explore, SEED, novelty=False, temporal_gate=False)
+    out = explore(
+        con_explore, SEED, novelty=False, temporal_gate=False, credit_importance=False,
+    )
     results = _by_tconst(out["results"])
 
     # tt1002: 1976 (same decade as 1975) + genre "Drama" shared with F.
@@ -392,6 +429,55 @@ def test_temporal_gate_rescore_clause(con_explore):
 def test_temporal_gate_off_keeps_all(con_explore):
     off = _by_tconst(explore(con_explore, SEED, novelty=False, temporal_gate=False)["results"])
     assert {"tt1007", "tt1008", "tt1009", "tt1010", "tt1011"} <= set(off)
+
+
+# --------------------------------------------------------------------------
+# credit-importance billing down-weight (cast only, default ON)
+# --------------------------------------------------------------------------
+
+
+def test_billing_down_weight_low_billed_below_top_billed(con_explore):
+    out = _by_tconst(
+        explore(con_explore, SEED, novelty=False, temporal_gate=False)["results"]
+    )
+    # nm2016 (ordering=9, a deep cameo) vs. nm2017 (ordering=1, the lead) --
+    # identical category, degree, and zero bonus noise (same decade/genre,
+    # neither overlapping the seed's), so the whole gap is billing.
+    low_billed = out["tt1013"]["score"]
+    top_billed = out["tt1014"]["score"]
+    assert low_billed < top_billed
+    # Top billing (ordering=1) is untouched by the billing factor.
+    assert top_billed == pytest.approx(CATEGORY_WEIGHT["actor"] * idf(2), abs=1e-4)
+
+
+def test_billing_down_weight_crew_unaffected_by_ordering(con_explore):
+    out = _by_tconst(
+        explore(con_explore, SEED, novelty=False, temporal_gate=False)["results"]
+    )
+    # nm2018 is a cinematographer at ordering=9 on the seed -- billing is
+    # cast-only, so this scores exactly as if ordering were 1.
+    assert out["tt1015"]["score"] == pytest.approx(
+        CATEGORY_WEIGHT["cinematographer"] * idf(2), abs=1e-4
+    )
+
+
+def test_billing_down_weight_off_flag_no_effect(con_explore):
+    out = _by_tconst(explore(
+        con_explore, SEED, novelty=False, temporal_gate=False, credit_importance=False,
+    )["results"])
+    assert out["tt1013"]["score"] == pytest.approx(out["tt1014"]["score"], abs=1e-4)
+    assert out["tt1013"]["score"] == pytest.approx(CATEGORY_WEIGHT["actor"] * idf(2), abs=1e-4)
+
+
+def test_billing_factor_missing_ordering_is_not_penalized():
+    # No usable credited/uncredited signal exists in IMDb's free datasets
+    # (traced during pre-ship tuning: "uncredited" appears in the
+    # characters field on 21 of ~42M actor/actress rows -- noise, not a
+    # signal) -- billing is ordering-only. Missing ordering must never be
+    # treated as evidence of a cameo.
+    assert _billing_factor(None) == 1.0
+    assert _billing_factor(1) == 1.0
+    assert _billing_factor(9) < 1.0
 
 
 # --------------------------------------------------------------------------

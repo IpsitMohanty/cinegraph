@@ -54,22 +54,41 @@ Algorithm, for a seed film F:
          on purpose. If every one of a candidate's person-edges is dropped
          by this gate, the candidate itself is dropped (no bonus-only
          candidates).
-  6. Top-N by score, each with its explanation. `thin_data` is set on the
+  6. credit_importance=True (default -- pre-ship tuning) scales a CAST
+     (actor/actress) edge's weight by the person's billing on the seed:
+     `1 / (1 + credit_importance_k * (ordering - 1))`, so the top-billed
+     lead (ordering=1) is untouched and a deep cameo is progressively
+     weaker. This is cast-only, deliberately -- cinematographer/editor/
+     composer are already the strong edges and aren't the problem; cast is
+     the triple-suppressed category (low category_weight + high idf-degree
+     discount + now billing), aimed at a low-billed cameo (Benazeraf's bit
+     part in Breathless) dominating discovery on a thin-crew film. IMDb's
+     free datasets carry no clean, usable credited/uncredited flag (traced
+     during pre-ship tuning: "uncredited" appears in the characters field
+     on 21 of ~42M actor/actress rows -- noise, not a signal), so this is
+     billing-order only, not a credited/uncredited check -- no such flag is
+     fabricated.
+  7. Top-N by score, each with its explanation. `thin_data` is set on the
      result when the seed's own `credits` rows never include a
      non-cast/actress category at all (Breathless: 10 principals rows, all
-     cast) -- that's a source-coverage gap no scoring rule can fix; it's
-     signalled, not patched over.
+     cast) -- that's a source-coverage gap no scoring rule can fix,
+     billing-aware or not; it's signalled, not patched over.
 
 Votes are NOT in this file. `imdb_rating`/`imdb_votes` never appear in
 scoring, ranking, or novelty -- that line is deliberate and non-negotiable
 (see README "Stance"); grep for confirmation if in doubt.
 
 CATEGORY_WEIGHT, DECADE_BONUS, GENRE_BONUS_*, FRANCHISE_*,
-SAME_DIRECTOR_PENALTY, CROSS_DIRECTOR_BONUS, and TEMPORAL_GATE_YEAR_GAP are
-hand-set PRIORS for this walking skeleton -- SAME_DIRECTOR_PENALTY and the
-temporal gate were tuned once already, against a pre-registered 12-seed,
-120-row human eval (PREDICTIONS_tuning.md); the rest remain to be tuned
-the same way, not treated as truths.
+SAME_DIRECTOR_PENALTY, CROSS_DIRECTOR_BONUS, TEMPORAL_GATE_YEAR_GAP, and
+CREDIT_IMPORTANCE_K are hand-set PRIORS for this walking skeleton --
+SAME_DIRECTOR_PENALTY, the temporal gate, and CREDIT_IMPORTANCE_K were each
+tuned once, against pre-registered human evals (PREDICTIONS_tuning.md);
+the rest remain to be tuned the same way, not treated as truths. This is
+the last scoring change before Connect/Follow -- crew-clique list
+redundancy (Tokyo Story, Pather Panchali, In the Mood ranks 1-6) is a
+list-level diversity problem (MMR/xQuAD), not a scalar-weight one, and is
+explicitly deferred to a post-ship reranker rather than chased here with
+more priors.
 
 Capability boundaries (also in README): era/genre are explicit, read
 straight from `film`. Movement is never a label the engine prints -- it
@@ -131,6 +150,14 @@ CROSS_DIRECTOR_BONUS = 0.1
 # with no birth_year connecting films more than this many years apart is
 # treated as a modern rescore/re-release credit, not a real collaboration.
 TEMPORAL_GATE_YEAR_GAP = 40
+
+# credit_importance=True (default) billing down-weight, cast only. Started
+# conservative per the pre-ship brief: ordering=1 (top-billed lead) is
+# never penalized; a deep cameo's edge shrinks progressively. Not a
+# credited/uncredited flag -- IMDb's free datasets don't carry one cleanly
+# (see module docstring).
+CAST_CATEGORIES = frozenset({"actor", "actress"})
+CREDIT_IMPORTANCE_K = 0.15
 
 DEFAULT_N = 20
 
@@ -214,6 +241,16 @@ def _is_edge_implausible(
         return True
 
     return False
+
+
+def _billing_factor(ordering, k=CREDIT_IMPORTANCE_K) -> float:
+    """Cast-only billing down-weight: 1.0 for the top-billed lead
+    (ordering=1), decreasing as ordering rises. `ordering` missing/
+    uncastable -> no penalty; absence of billing data is not evidence of a
+    cameo, so we don't guess. Pure function, unit-testable directly."""
+    if ordering is None:
+        return 1.0
+    return 1.0 / (1.0 + k * max(ordering - 1, 0))
 
 
 # --------------------------------------------------------------------------
@@ -348,6 +385,8 @@ def explore(
     cross_director_bonus: float = CROSS_DIRECTOR_BONUS,
     temporal_gate: bool = True,
     temporal_gate_year_gap: int = TEMPORAL_GATE_YEAR_GAP,
+    credit_importance: bool = True,
+    credit_importance_k: float = CREDIT_IMPORTANCE_K,
     person_degree: dict | None = None,
 ) -> dict:
     """Film in -> ranked, explained connected films out.
@@ -358,16 +397,17 @@ def explore(
     Raises ValueError if `tconst` isn't in `film`.
 
     novelty, same_director_penalty, cross_director_bonus_enabled,
-    cross_director_bonus, temporal_gate, temporal_gate_year_gap: see module
-    docstring. Every one is a config flag specifically so eval_explore.py
-    can measure with/without.
+    cross_director_bonus, temporal_gate, temporal_gate_year_gap,
+    credit_importance, credit_importance_k: see module docstring. Every one
+    is a config flag specifically so eval_explore.py can measure with/
+    without.
     """
     seed = _get_film(con, tconst)
     if seed is None:
         raise ValueError(f"tconst {tconst!r} not found in film")
 
     people_f_rows = con.execute(
-        "SELECT nconst, category FROM credits WHERE tconst = ?", [tconst]
+        "SELECT nconst, category, ordering FROM credits WHERE tconst = ?", [tconst]
     ).fetchall()
     thin_data = _is_thin_data(people_f_rows)
     if not people_f_rows:
@@ -375,14 +415,17 @@ def explore(
 
     # One role per person on F: if credited in multiple categories, the
     # higher-weighted one wins (one edge per shared person, not one per
-    # category row).
+    # category row). ordering_f carries the billing that went with the
+    # winning role, for the cast billing down-weight.
     roles_f = {}
-    for nconst, category in people_f_rows:
+    ordering_f = {}
+    for nconst, category, ordering in people_f_rows:
         w = CATEGORY_WEIGHT.get(category, 0.0)
         if nconst not in roles_f or w > CATEGORY_WEIGHT.get(roles_f[nconst], 0.0):
             roles_f[nconst] = category
+            ordering_f[nconst] = ordering
 
-    director_nconsts_f = {nc for nc, cat in people_f_rows if cat == "director"}
+    director_nconsts_f = {nc for nc, cat, _ord in people_f_rows if cat == "director"}
 
     nconsts = list(roles_f.keys())
     placeholders = ",".join("?" for _ in nconsts)
@@ -445,6 +488,8 @@ def explore(
         for nconst in shared_nconsts:
             role = roles_f[nconst]
             weight = CATEGORY_WEIGHT.get(role, 0.0) * idf(degree.get(nconst, 1))
+            if credit_importance and role in CAST_CATEGORIES:
+                weight *= _billing_factor(ordering_f.get(nconst), credit_importance_k)
             if novelty and (cand_tconst, nconst) in same_director_pairs:
                 weight *= same_director_penalty
             people_score += weight
@@ -495,7 +540,7 @@ def _is_thin_data(people_f_rows) -> bool:
     """True when the seed's own `credits` rows never include a non-cast
     category -- a source-coverage gap (Breathless: 10 principals rows, all
     cast), not a scoring problem. Zero credits at all counts as thin too."""
-    non_cast = {cat for _, cat in people_f_rows if cat not in ("actor", "actress")}
+    non_cast = {cat for _, cat, _ord in people_f_rows if cat not in CAST_CATEGORIES}
     return len(non_cast) == 0
 
 
