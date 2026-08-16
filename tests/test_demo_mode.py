@@ -97,13 +97,25 @@ def demo_env(tmp_path, monkeypatch):
     return artifact_path
 
 
+def _submit_demo_search(at, query):
+    """Fills the search box and submits the st.form -- st.form_submit_button
+    shows up under at.button (Streamlit represents it as a Button with a
+    "FormSubmitter:<form_id>-<label>" key), found here by label rather than
+    hardcoding that key format. A form's submit button is what Enter in the
+    field triggers too -- Streamlit treats both as the same submission
+    event, so this is the sanctioned proxy for "Enter submits" (AppTest has
+    no raw-keyboard-event simulation)."""
+    at.text_input(key="demo_search_query").input(query)
+    submit = [b for b in at.button if b.label == "Search"][0]
+    submit.click().run(timeout=30)
+
+
 def test_demo_mode_loads_artifact_without_opening_duckdb(demo_env):
     at = AppTest.from_file(APP_PATH)
     at.run(timeout=30)
     assert not at.exception
 
-    at.text_input(key="demo_search_query").input("Winter Ledger")
-    at.button(key="demo_search_button").click().run(timeout=30)
+    _submit_demo_search(at, "Winter Ledger")
     assert not at.exception
 
     body = " ".join(m.value for m in at.markdown) + " ".join(w.value for w in at.subheader)
@@ -115,8 +127,7 @@ def test_demo_mode_off_roster_query_is_honest(demo_env):
     at = AppTest.from_file(APP_PATH)
     at.run(timeout=30)
 
-    at.text_input(key="demo_search_query").input("Not In The Roster At All")
-    at.button(key="demo_search_button").click().run(timeout=30)
+    _submit_demo_search(at, "Not In The Roster At All")
 
     assert not at.exception
     assert len(at.error) == 1
@@ -128,8 +139,7 @@ def test_demo_mode_follow_person_from_search_result(demo_env):
     at = AppTest.from_file(APP_PATH)
     at.run(timeout=30)
 
-    at.text_input(key="demo_search_query").input("Winter Ledger")
-    at.button(key="demo_search_button").click().run(timeout=30)
+    _submit_demo_search(at, "Winter Ledger")
     assert not at.exception
 
     # tt9000's director (nm9001) is precomputed -- its Follow button must
@@ -141,6 +151,81 @@ def test_demo_mode_follow_person_from_search_result(demo_env):
 
     body = " ".join(m.value for m in at.markdown) + " ".join(w.value for w in at.subheader)
     assert "Follow: Demo Director" in body
+
+
+def test_demo_mode_browse_list_click_selects_film(demo_env):
+    """Fix 2: clicking a title in the browse-all list must render that
+    film's result, through the exact same demo_explore_tconst
+    session_state key search uses -- no second selection path."""
+    at = AppTest.from_file(APP_PATH)
+    at.run(timeout=30)
+    assert not at.exception
+
+    browse_buttons = [b for b in at.button if b.key and b.key.startswith("demo_browse_")]
+    assert len(browse_buttons) == len(ROSTER), "expected one browse button per roster film"
+
+    target = [b for b in browse_buttons if b.label.startswith("Coastal Harbor")][0]
+    target.click().run(timeout=30)
+    assert not at.exception
+    assert at.session_state["demo_explore_tconst"] == "tt9002"
+
+    body = " ".join(m.value for m in at.markdown) + " ".join(w.value for w in at.subheader)
+    assert "Coastal Harbor" in body
+    assert "1980" in body
+
+
+def test_demo_mode_cast_names_deduped():
+    """Fix 3: a person credited on more than one `credits` row for the same
+    film/category must render once, not "Name, Name". Doesn't use the
+    demo_env fixture -- it needs its own real duckdb.connect() to build a
+    tiny fixture artifact, which demo_env's booby-trap (correctly) forbids."""
+    con = duckdb.connect(":memory:")
+    con.execute("""
+        CREATE TABLE film (
+            tconst VARCHAR, primaryTitle VARCHAR, startYear INTEGER, genres VARCHAR
+        )
+    """)
+    con.execute("INSERT INTO film VALUES ('tt9500', 'Duplicate Billing', 1990, 'Drama')")
+    con.execute("""
+        CREATE TABLE credits (
+            tconst VARCHAR, nconst VARCHAR, category VARCHAR, ordering INTEGER
+        )
+    """)
+    con.executemany("INSERT INTO credits VALUES (?, ?, ?, ?)", [
+        ("tt9500", "nm9500", "actor", 1),
+        ("tt9500", "nm9500", "actor", 2),  # same person, second ordering row
+        ("tt9500", "nm9501", "director", 3),
+    ])
+    con.execute("""
+        CREATE TABLE person (
+            nconst VARCHAR, primary_name VARCHAR, birth_year INTEGER, death_year INTEGER
+        )
+    """)
+    con.executemany("INSERT INTO person VALUES (?, ?, NULL, NULL)", [
+        ("nm9500", "Repeat Player"),
+        ("nm9501", "Solo Director"),
+    ])
+    artifact = build_artifact(con, roster=["tt9500"], pairs=[])
+    con.close()
+
+    # film_view() itself (cde/follow.py) is untouched -- the raw, undeduped
+    # rows are still there. This asserts the fixture actually has the
+    # duplicate (so the test would fail if the fixture stopped exercising
+    # the bug), then that app.streamlit_app's own dedupe helper collapses it.
+    raw_names = [
+        p["name"]
+        for g in artifact["seeds"]["tt9500"]["film_view"]["groups"]
+        for p in g["people"]
+    ]
+    assert raw_names.count("Repeat Player") == 2, "fixture no longer exercises the dup case"
+
+    import app.streamlit_app as entrypoint
+    deduped_names = [
+        p["name"]
+        for g in artifact["seeds"]["tt9500"]["film_view"]["groups"]
+        for p in entrypoint._dedupe_people(g["people"])
+    ]
+    assert deduped_names.count("Repeat Player") == 1
 
 
 def test_entrypoint_import_chain_never_opens_duckdb_in_demo_mode(monkeypatch):

@@ -107,9 +107,29 @@ def _back_to_explore():
     st.rerun()
 
 
+def _dedupe_people(people):
+    """Preserve order, drop repeat nconsts. film_view() groups credits
+    straight off `credits` rows -- the same person can be credited on
+    more than one ordering row for one film/category, which otherwise
+    renders as a visual duplicate ("Joseph Cotten, Joseph Cotten") or, for
+    button-rendered groups, two widgets sharing one key. Display-layer
+    only: cde/follow.py's grouping and the frozen demo artifact are
+    untouched, this only changes what's shown."""
+    seen = set()
+    deduped = []
+    for p in people:
+        nconst = p.get("nconst")
+        if nconst in seen:
+            continue
+        seen.add(nconst)
+        deduped.append(p)
+    return deduped
+
+
 def _render_person_buttons(people, key_prefix):
     """people: list of {"nconst", "name"} (or "person_name"/"nconst" from
     Explore connections). Renders each as a clickable Follow pivot."""
+    people = _dedupe_people(people)
     if not people:
         return
     cols = st.columns(min(len(people), 4) or 1)
@@ -363,7 +383,7 @@ def _render_demo_film(artifact, tconst):
     st.subheader(f"{seed['title']} ({seed['year']})")
     for group in seed["film_view"]["groups"]:
         st.markdown(f"**{group['category']}**")
-        st.write(", ".join(p["name"] for p in group["people"]))
+        st.write(", ".join(p["name"] for p in _dedupe_people(group["people"])))
 
     # Only entities actually precomputed for this seed are clickable --
     # demo mode makes no live engine call, so nothing else can be offered
@@ -438,27 +458,45 @@ def _render_demo_follow_context(artifact):
         st.write(f"{year} — **{f['title']}**")
 
 
+def _render_demo_browse_list(artifact):
+    """Clickable roster list -- writes into the exact same
+    st.session_state["demo_explore_tconst"] key _render_demo_explore_tab's
+    search sets, so one click renders a film's result the same way a
+    successful search does (no second selection path to keep in sync)."""
+    items = roster_titles(artifact)
+    cols = st.columns(3)
+    for i, (tconst, label) in enumerate(items):
+        with cols[i % len(cols)]:
+            if st.button(label, key=f"demo_browse_{tconst}"):
+                st.session_state["demo_explore_tconst"] = tconst
+
+
 def _render_demo_explore_tab(artifact):
     n_roster = len(artifact["seeds"])
     st.write(
         f"This demo covers {n_roster} curated films with precomputed results. "
         "The full engine runs live against the complete IMDb-derived backbone locally."
     )
-    query = st.text_input("Search the demo roster (title)", key="demo_search_query")
-    with st.expander(f"browse all {n_roster} films in this demo"):
-        for _tconst, label in roster_titles(artifact):
-            st.write(label)
 
-    if st.button("Search", key="demo_search_button") and query.strip():
+    # st.form so pressing Enter in the text_input submits (same as
+    # clicking the button) instead of doing nothing until a separate
+    # button click.
+    with st.form("demo_search_form"):
+        query = st.text_input("Search the demo roster (title)", key="demo_search_query")
+        submitted = st.form_submit_button("Search")
+    if submitted and query.strip():
         tconst = _demo_search(artifact, query)
         if tconst is None:
             st.error(
                 f"'{query}' isn't in this {n_roster}-film demo roster -- try the "
-                "browse list above, or run the full engine locally against the "
+                "browse list below, or run the full engine locally against the "
                 "complete backbone."
             )
-            return
-        st.session_state["demo_explore_tconst"] = tconst
+        else:
+            st.session_state["demo_explore_tconst"] = tconst
+
+    with st.expander(f"browse all {n_roster} films in this demo"):
+        _render_demo_browse_list(artifact)
 
     tconst = st.session_state.get("demo_explore_tconst")
     if tconst:
