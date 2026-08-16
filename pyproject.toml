@@ -32,6 +32,16 @@ markers = [
 ]
 addopts = "-q"
 testpaths = ["tests"]
+# Root-level harness scripts (eval_explore.py, build_demo_artifact.py) are
+# importable locally only because a dev venv's cwd-adjacent editable
+# install / interactive-shell sys.path happens to include the repo root.
+# CI's clean checkout does not -- tests/test_eval_explore.py's bare
+# `from eval_explore import ...` failed collection there with
+# ModuleNotFoundError, the same local-vs-CI sys.path class of bug as the
+# `cde` import fix. This puts the repo root on pytest's own sys.path
+# (independent of whatever import mechanism cde itself uses) so those
+# harness scripts resolve identically in both places.
+pythonpath = ["."]
 
 [tool.flake8]
 max-line-length = 100
