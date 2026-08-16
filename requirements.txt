@@ -9,3 +9,15 @@
 # this file just unions both for the one-manifest cases.
 -r requirements-core.txt
 -r requirements-app.txt
+
+# Editable install of this repo's own `cde` package (pyproject.toml
+# declares it). Locally, `cde` was importable because dev setup did a
+# one-time `pip install -e .` into the venv by hand -- Streamlit Community
+# Cloud only ever runs this file, so without this line `cde` is never
+# installed there at all. Streamlit's `streamlit run app/streamlit_app.py`
+# puts app/ (the script's own directory), not the repo root, on sys.path
+# -- so `from cde.config import ...` fails with ModuleNotFoundError on
+# Cloud even though the file layout is identical to local. `-e .` (not a
+# plain `.`) so local dev edits to cde/ are picked up live without a
+# reinstall, same as the by-hand install it replaces.
+-e .

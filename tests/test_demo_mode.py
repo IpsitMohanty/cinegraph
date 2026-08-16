@@ -12,6 +12,7 @@ session_state key collisions, etc.) a code read wouldn't.
 
 from __future__ import annotations
 
+import importlib
 from pathlib import Path
 
 import duckdb
@@ -140,3 +141,34 @@ def test_demo_mode_follow_person_from_search_result(demo_env):
 
     body = " ".join(m.value for m in at.markdown) + " ".join(w.value for w in at.subheader)
     assert "Follow: Demo Director" in body
+
+
+def test_entrypoint_import_chain_never_opens_duckdb_in_demo_mode(monkeypatch):
+    """Regression test for the deploy-importfix bug: the traceback (\"No
+    module named 'cde'\") was at MODULE IMPORT time, before main()'s
+    demo-mode branch ever ran -- the earlier AppTest-based tests above
+    proved the demo *renderer* never opens film.duckdb, but AppTest execs
+    the whole script fresh on every .run(), which can mask an import-chain
+    regression if cde happens to already be resolvable in the test
+    process (as it is here -- the actual missing-package failure only
+    reproduces in a genuinely clean install, verified separately when
+    fixing this). This test instead locks in the narrower, durable
+    property directly: importing app.streamlit_app's whole chain (cde.config,
+    cde.connect, cde.demo, cde.explore, cde.follow, cde.resolve) in demo
+    mode, with no film.duckdb reachable, must never call duckdb.connect().
+    importlib.reload() forces app.streamlit_app's own top-level statements
+    to genuinely re-run rather than short-circuiting via sys.modules.
+    """
+    monkeypatch.setenv("CDE_DEMO_MODE", "1")
+    monkeypatch.setenv("CDE_DB_PATH", "/nonexistent/film.duckdb")
+
+    def _forbidden_connect(*args, **kwargs):
+        raise AssertionError(
+            "importing the entrypoint called duckdb.connect() -- "
+            "import-time must never open film.duckdb"
+        )
+    monkeypatch.setattr(duckdb, "connect", _forbidden_connect)
+
+    import app.streamlit_app as entrypoint
+    importlib.reload(entrypoint)
+    assert entrypoint.DEMO_MODE is True
