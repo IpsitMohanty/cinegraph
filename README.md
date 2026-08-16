@@ -185,15 +185,3 @@ See the project setup instructions and `DATA_SOURCES.md` before running the full
 
 ---
 
-## Status
-
-The first public version is intentionally narrow:
-
-- Explore
-- craft-first film view
-- Follow
-- Connect
-- explicit evaluation
-- honest failure states
-
-The next work is not another round of scalar tuning. The main open problems are list-level diversity, richer role integrity, and better attention/curation signals for paths that are structurally valid but cinematically weak.
