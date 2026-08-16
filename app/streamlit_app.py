@@ -52,7 +52,7 @@ def main():
         year = st.text_input("Year (optional)")
 
     novelty = st.checkbox(
-        "Novelty mode (down-weight same-director results)", value=False
+        "Demote same-director results (default on)", value=True
     )
     n = st.slider("How many results", 5, 50, 20)
 
@@ -68,6 +68,14 @@ def main():
         seed = result["seed"]
         st.subheader(f"{seed['title']} ({seed['year']})")
         st.caption(", ".join(seed["genres"]) or "no genre listed")
+
+        if result["thin_data"]:
+            st.info(
+                "Limited crew data for this film -- IMDb's credited principals for "
+                "this title are cast-only, so results below lean on cast "
+                "connections rather than cinematographer/editor/composer/writer "
+                "links. Not a ranking judgment, just a coverage gap."
+            )
 
         if not result["results"]:
             st.write("No connected films found (no shared creative collaborators).")

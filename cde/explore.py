@@ -24,21 +24,52 @@ Algorithm, for a seed film F:
          whose title shares a long common prefix with F's (sequels). Real
          series data (Wikidata P179) is the proper fix, parked with the
          Wikidata merge.
-       - novelty=True down-weights (not zeroes) the specific edge
-         contribution of a person who is F's director AND is also credited
-         as director on the candidate -- so Explore doesn't just return the
-         rest of one filmography. Off by default; same-director candidates
-         stay visible but rarely dominate anyway, since idf already
-         discounts anyone with many films (directors included).
-  6. Top-N by score, each with its explanation.
+       - novelty=True (default -- see stage 3A tuning) down-weights, not
+         zeroes, the specific edge contribution of a person who is F's
+         director AND is also credited as director on the candidate, by
+         `same_director_penalty` -- so Explore doesn't just return the rest
+         of one filmography. Demote, don't drop: the tuning eval found
+         same-director results were STILL judged interesting 37% of the
+         time, so a same-director candidate stays visible, just ranked on
+         its other merits. An optional, OFF-by-default cross_director_bonus
+         rewards a shared craftsperson connecting two DIFFERENT directors
+         (the "lateral jump" the eval judged best) -- provisional, since
+         the eval that surfaced it was confounded with the thin-data/
+         rescore failure mode below, not yet cleanly isolated.
+       - temporal_gate=True (default) drops a specific person-edge that
+         can't be real: (a) universally, any category, when the person's
+         birth_year postdates the older of the two films -- nobody credited
+         on a film before they were born, no exceptions; (b) for non-writer
+         categories, when the person's death_year precedes the older film
+         -- their working window can't span both; (c) a composer with NO
+         birth_year at all connecting films more than
+         `temporal_gate_year_gap` years apart -- the rescore/re-release
+         signature (a modern band or arranger credited on a remastered
+         reissue of an old film) that (a)/(b) can't catch since there's no
+         birth data to compare. Rule (b) deliberately EXEMPTS writer: a
+         source-material author credited posthumously on an adaptation
+         decades later (Akutagawa -> The Outrage; Bandyopadhyay across the
+         Apu trilogy) is real adaptation lineage, not a data error -- the
+         tuning eval traced exactly this false positive and it's excluded
+         on purpose. If every one of a candidate's person-edges is dropped
+         by this gate, the candidate itself is dropped (no bonus-only
+         candidates).
+  6. Top-N by score, each with its explanation. `thin_data` is set on the
+     result when the seed's own `credits` rows never include a
+     non-cast/actress category at all (Breathless: 10 principals rows, all
+     cast) -- that's a source-coverage gap no scoring rule can fix; it's
+     signalled, not patched over.
 
 Votes are NOT in this file. `imdb_rating`/`imdb_votes` never appear in
 scoring, ranking, or novelty -- that line is deliberate and non-negotiable
 (see README "Stance"); grep for confirmation if in doubt.
 
-CATEGORY_WEIGHT, DECADE_BONUS, GENRE_BONUS_*, FRANCHISE_*, and
-NOVELTY_DIRECTOR_DAMPING are hand-set PRIORS for this walking skeleton --
-to be tuned by eval_explore.py's judgment pass, not treated as truths.
+CATEGORY_WEIGHT, DECADE_BONUS, GENRE_BONUS_*, FRANCHISE_*,
+SAME_DIRECTOR_PENALTY, CROSS_DIRECTOR_BONUS, and TEMPORAL_GATE_YEAR_GAP are
+hand-set PRIORS for this walking skeleton -- SAME_DIRECTOR_PENALTY and the
+temporal gate were tuned once already, against a pre-registered 12-seed,
+120-row human eval (PREDICTIONS_tuning.md); the rest remain to be tuned
+the same way, not treated as truths.
 
 Capability boundaries (also in README): era/genre are explicit, read
 straight from `film`. Movement is never a label the engine prints -- it
@@ -82,9 +113,24 @@ GENRE_BONUS_CAP_GENRES = 2  # cap so a multi-genre overlap can't outrun an edge
 FRANCHISE_MIN_PREFIX = 5
 FRANCHISE_MIN_FRACTION = 0.6
 
-# novelty=True damping factor applied to a same-director edge's weight
-# (not the whole candidate's score -- other shared people still count).
-NOVELTY_DIRECTOR_DAMPING = 0.3
+# novelty=True (default) damping factor applied to a same-director edge's
+# weight (not the whole candidate's score -- other shared people still
+# count). Calibrated against the tuning eval: same-director rows were ~10x
+# more likely trivial than cross-director, but still interesting 37% of the
+# time -- 0.4 demotes without dropping.
+SAME_DIRECTOR_PENALTY = 0.4
+
+# cross_director_bonus_enabled=True (OFF by default) additive bonus when a
+# shared craftsperson connects the seed to a candidate with a different,
+# specifically-identified director. Provisional: the eval signal for this
+# was confounded with the thin-data/rescore failure mode, not yet cleanly
+# isolated -- see module docstring.
+CROSS_DIRECTOR_BONUS = 0.1
+
+# temporal_gate=True (default) rescore/band-clause threshold: a composer
+# with no birth_year connecting films more than this many years apart is
+# treated as a modern rescore/re-release credit, not a real collaboration.
+TEMPORAL_GATE_YEAR_GAP = 40
 
 DEFAULT_N = 20
 
@@ -129,6 +175,45 @@ def _is_franchise_pair(title_f: str, title_c: str) -> bool:
         return False
     prefix = _common_prefix_len(title_f, title_c)
     return prefix >= FRANCHISE_MIN_PREFIX and (prefix / shorter) >= FRANCHISE_MIN_FRACTION
+
+
+def _is_edge_implausible(
+    role, birth_year, death_year, seed_year, cand_year,
+    year_gap_threshold=TEMPORAL_GATE_YEAR_GAP,
+) -> bool:
+    """The temporal-plausibility gate's three rules (see module docstring).
+    Pure function -- no DB access -- so it's directly unit-testable.
+
+    The asymmetry is deliberate and is the crux of the whole gate:
+    "credited after death" is normal for a source-material writer
+    (adaptation lineage); "born after the film" is never legitimate, for
+    any role. Encoding only one of these would either miss real rescore
+    artifacts or wrongly demote real adaptation-lineage edges.
+    """
+    if seed_year is None or cand_year is None:
+        return False
+    older_year = min(seed_year, cand_year)
+    gap = abs(cand_year - seed_year)
+
+    # Rule 1: universal, all categories including writer. Nobody credited
+    # on a film before they were born -- no exceptions.
+    if birth_year is not None and birth_year > older_year:
+        return True
+
+    # Rule 2: excludes writer. Posthumous source-material credit is
+    # legitimate adaptation lineage (Rashomon -> The Outrage; the Apu
+    # trilogy), not an artifact -- do not demote those.
+    if role != "writer" and death_year is not None and death_year < older_year:
+        return True
+
+    # Rule 3: rescore/band signature -- a composer with NO birth_year at
+    # all (a band/collective entity, commonly) credited across a large
+    # gap. Rule 1 structurally can't catch this: there's no birth data to
+    # compare against.
+    if role == "composer" and birth_year is None and gap > year_gap_threshold:
+        return True
+
+    return False
 
 
 # --------------------------------------------------------------------------
@@ -201,6 +286,38 @@ def _fetch_person_names(con, nconsts):
     return dict(rows)
 
 
+def _fetch_person_birth_death(con, nconsts):
+    """(birth_year, death_year) per nconst, for the temporal-plausibility
+    gate. Missing from `person` entirely, or NULL in name.basics, both
+    come back as (None, None) -- absence of data is never itself evidence
+    of implausibility (see _is_edge_implausible)."""
+    if not nconsts:
+        return {}
+    values_sql = ", ".join("(?)" for _ in nconsts)
+    rows = con.execute(f"""
+        SELECT v.nconst, p.birth_year, p.death_year
+        FROM (VALUES {values_sql}) AS v(nconst)
+        LEFT JOIN person p ON p.nconst = v.nconst
+    """, nconsts).fetchall()
+    return {nconst: (birth_year, death_year) for nconst, birth_year, death_year in rows}
+
+
+def _fetch_candidate_directors(con, tconsts):
+    """tconst -> set of director nconsts, for the (off-by-default)
+    cross-director bonus."""
+    if not tconsts:
+        return {}
+    placeholders = ",".join("?" for _ in tconsts)
+    rows = con.execute(f"""
+        SELECT tconst, nconst FROM credits
+        WHERE tconst IN ({placeholders}) AND category = 'director'
+    """, tconsts).fetchall()
+    out = defaultdict(set)
+    for t, nconst in rows:
+        out[t].add(nconst)
+    return out
+
+
 # --------------------------------------------------------------------------
 # Explanation formatting
 # --------------------------------------------------------------------------
@@ -221,14 +338,29 @@ def _format_explanation(connections, shared_decade, shared_genres):
 # Explore
 # --------------------------------------------------------------------------
 
-def explore(con: duckdb.DuckDBPyConnection, tconst: str, n: int = DEFAULT_N,
-            novelty: bool = False, person_degree: dict | None = None) -> dict:
+def explore(
+    con: duckdb.DuckDBPyConnection,
+    tconst: str,
+    n: int = DEFAULT_N,
+    novelty: bool = True,
+    same_director_penalty: float = SAME_DIRECTOR_PENALTY,
+    cross_director_bonus_enabled: bool = False,
+    cross_director_bonus: float = CROSS_DIRECTOR_BONUS,
+    temporal_gate: bool = True,
+    temporal_gate_year_gap: int = TEMPORAL_GATE_YEAR_GAP,
+    person_degree: dict | None = None,
+) -> dict:
     """Film in -> ranked, explained connected films out.
 
-    Returns {"seed": {...}, "results": [...]}. Each result is a legible
-    record (title, year, score, connections, shared_decade, shared_genres,
-    explanation) -- never a graph blob. Raises ValueError if `tconst` isn't
-    in `film`.
+    Returns {"seed": {...}, "results": [...], "thin_data": bool}. Each
+    result is a legible record (title, year, score, connections,
+    shared_decade, shared_genres, explanation) -- never a graph blob.
+    Raises ValueError if `tconst` isn't in `film`.
+
+    novelty, same_director_penalty, cross_director_bonus_enabled,
+    cross_director_bonus, temporal_gate, temporal_gate_year_gap: see module
+    docstring. Every one is a config flag specifically so eval_explore.py
+    can measure with/without.
     """
     seed = _get_film(con, tconst)
     if seed is None:
@@ -237,8 +369,9 @@ def explore(con: duckdb.DuckDBPyConnection, tconst: str, n: int = DEFAULT_N,
     people_f_rows = con.execute(
         "SELECT nconst, category FROM credits WHERE tconst = ?", [tconst]
     ).fetchall()
+    thin_data = _is_thin_data(people_f_rows)
     if not people_f_rows:
-        return {"seed": _seed_out(seed), "results": []}
+        return {"seed": _seed_out(seed), "results": [], "thin_data": thin_data}
 
     # One role per person on F: if credited in multiple categories, the
     # higher-weighted one wins (one edge per shared person, not one per
@@ -259,7 +392,7 @@ def explore(con: duckdb.DuckDBPyConnection, tconst: str, n: int = DEFAULT_N,
     """, nconsts + [tconst]).fetchall()
 
     if not candidate_rows:
-        return {"seed": _seed_out(seed), "results": []}
+        return {"seed": _seed_out(seed), "results": [], "thin_data": thin_data}
 
     by_candidate = defaultdict(list)
     for cand_tconst, nconst in candidate_rows:
@@ -282,6 +415,11 @@ def explore(con: duckdb.DuckDBPyConnection, tconst: str, n: int = DEFAULT_N,
 
     films_info = _fetch_films(con, list(by_candidate.keys()))
     person_names = _fetch_person_names(con, nconsts)
+    birth_death = _fetch_person_birth_death(con, nconsts) if temporal_gate else {}
+    candidate_directors = (
+        _fetch_candidate_directors(con, list(by_candidate.keys()))
+        if cross_director_bonus_enabled else {}
+    )
 
     results = []
     for cand_tconst, shared_nconsts in by_candidate.items():
@@ -291,13 +429,24 @@ def explore(con: duckdb.DuckDBPyConnection, tconst: str, n: int = DEFAULT_N,
         if _is_franchise_pair(seed["title"], cand["title"]):
             continue
 
+        if temporal_gate:
+            shared_nconsts = [
+                nconst for nconst in shared_nconsts
+                if not _is_edge_implausible(
+                    roles_f[nconst], *birth_death.get(nconst, (None, None)),
+                    seed["year"], cand["year"], temporal_gate_year_gap,
+                )
+            ]
+            if not shared_nconsts:
+                continue  # every edge to this candidate was implausible
+
         connections = []
         people_score = 0.0
         for nconst in shared_nconsts:
             role = roles_f[nconst]
             weight = CATEGORY_WEIGHT.get(role, 0.0) * idf(degree.get(nconst, 1))
             if novelty and (cand_tconst, nconst) in same_director_pairs:
-                weight *= NOVELTY_DIRECTOR_DAMPING
+                weight *= same_director_penalty
             people_score += weight
             connections.append({
                 "person_name": person_names.get(nconst, nconst),
@@ -318,6 +467,10 @@ def explore(con: duckdb.DuckDBPyConnection, tconst: str, n: int = DEFAULT_N,
             bonus += DECADE_BONUS
         if shared_genres:
             bonus += GENRE_BONUS_PER_GENRE * min(len(shared_genres), GENRE_BONUS_CAP_GENRES)
+        if cross_director_bonus_enabled and _is_cross_director(
+            director_nconsts_f, candidate_directors.get(cand_tconst, set())
+        ):
+            bonus += cross_director_bonus
 
         total_score = people_score + bonus
 
@@ -335,7 +488,25 @@ def explore(con: duckdb.DuckDBPyConnection, tconst: str, n: int = DEFAULT_N,
         })
 
     results.sort(key=lambda r: r["score"], reverse=True)
-    return {"seed": _seed_out(seed), "results": results[:n]}
+    return {"seed": _seed_out(seed), "results": results[:n], "thin_data": thin_data}
+
+
+def _is_thin_data(people_f_rows) -> bool:
+    """True when the seed's own `credits` rows never include a non-cast
+    category -- a source-coverage gap (Breathless: 10 principals rows, all
+    cast), not a scoring problem. Zero credits at all counts as thin too."""
+    non_cast = {cat for _, cat in people_f_rows if cat not in ("actor", "actress")}
+    return len(non_cast) == 0
+
+
+def _is_cross_director(seed_directors: set, candidate_directors: set) -> bool:
+    """True only when both films have an identified director and they
+    share none -- undefined (False) when either side has no director
+    credit at all, since "cross" isn't meaningful without something to be
+    across from."""
+    if not seed_directors or not candidate_directors:
+        return False
+    return not (seed_directors & candidate_directors)
 
 
 def _seed_out(seed):
