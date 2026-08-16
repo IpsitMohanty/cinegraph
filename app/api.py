@@ -1,7 +1,7 @@
 """Thin FastAPI layer for CineGraph Explore / Connect / Follow.
 
 Web-only deps (fastapi, uvicorn) live in requirements-app.txt, not
-requirements.txt -- the engine (cde/explore.py, cde/connect.py,
+requirements-core.txt -- the engine (cde/explore.py, cde/connect.py,
 cde/follow.py) is importable with duckdb alone and never imports this
 module.
 

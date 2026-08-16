@@ -22,7 +22,7 @@ jobs:
           pip install -r requirements-dev.txt
 
       - name: Lint (flake8)
-        run: flake8 cde tests --max-line-length 100 --extend-ignore E203,W503
+        run: flake8 cde tests app build_demo_artifact.py --max-line-length 100 --extend-ignore E203,W503
 
       - name: Test (pytest, unit only)
         run: pytest -q -m "not integration"

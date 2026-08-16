@@ -1,0 +1,8 @@
+# Core engine deps only (cde/), deliberately pandas-free -- this file
+# proves it: install just this and the engine (Explore/Follow/Connect,
+# cde/explore.py cde/connect.py cde/follow.py) works with no web
+# dependency. See requirements-app.txt for the API/UI layer on top, and
+# requirements.txt (repo root) for the combined set CI and deploy
+# platforms use.
+duckdb
+requests

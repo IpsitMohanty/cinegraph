@@ -1,9 +1,0 @@
-# Combined dependency file for deployment platforms that expect a single
-# requirements file (e.g. Streamlit Community Cloud's "Python dependencies
-# file path" setting). Local development instead installs
-# requirements.txt (core engine, pandas-free) and requirements-app.txt
-# (API/UI) separately -- see README "Local setup" -- keeping that split is
-# what proves the engine has no web dependency; this file exists only so a
-# deploy platform has one thing to point at.
--r requirements.txt
--r requirements-app.txt

@@ -1,2 +1,11 @@
-duckdb
-requests
+# Combined dependency file for CI and single-manifest deploy platforms.
+# Streamlit Community Cloud auto-discovers only requirements.txt /
+# pyproject.toml at the repo root -- a custom name (this file used to be
+# requirements-deploy.txt) is silently ignored, which was a real deploy
+# bug fixed by this file existing under this exact name. Local dev
+# instead installs requirements-core.txt (pandas-free engine) and
+# requirements-app.txt (API/UI) separately -- see README "Local setup" --
+# keeping that split is what proves the engine has no web dependency;
+# this file just unions both for the one-manifest cases.
+-r requirements-core.txt
+-r requirements-app.txt

@@ -187,7 +187,7 @@ Stated honestly, not smoothed over:
 
 ```bash
 # Core engine (pandas-free)
-pip install -r requirements.txt
+pip install -r requirements-core.txt
 python -m cde.cli build                  # downloads + builds data/processed/film.duckdb
 python -m cde.cli build --with-people     # + name.basics / title.principals
 
@@ -200,12 +200,14 @@ streamlit run app/streamlit_app.py        # search -> Explore -> Follow / Connec
 python build_demo_artifact.py             # writes demo/artifact.json
 CDE_DEMO_MODE=1 streamlit run app/streamlit_app.py   # browses the artifact, no film.duckdb opened
 
-# Deploy platforms expecting one requirements file: requirements-deploy.txt
-# (= requirements.txt + requirements-app.txt combined; see that file's header)
+# requirements.txt (repo root) = requirements-core.txt + requirements-app.txt
+# combined -- what CI installs, and what single-manifest deploy platforms
+# (e.g. Streamlit Community Cloud, which only auto-discovers requirements.txt
+# or pyproject.toml at the repo root) pick up automatically.
 
 # Development
 pip install -r requirements.txt -r requirements-dev.txt
-flake8 cde tests
+flake8 cde tests app build_demo_artifact.py
 pytest -q -m "not integration"           # unit tests (what CI runs)
 pytest -q -m integration                 # + integration, needs a built film.duckdb
 ```

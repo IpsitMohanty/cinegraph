@@ -1,3 +1,7 @@
+# API/UI layer only (app/api.py, app/streamlit_app.py) -- the engine
+# (cde/) never imports these. See requirements-core.txt for the
+# pandas-free engine-only deps, and requirements.txt (repo root) for the
+# combined set CI and deploy platforms use.
 fastapi
 uvicorn
 streamlit
